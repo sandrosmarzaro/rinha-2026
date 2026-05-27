@@ -12,7 +12,7 @@ x-api: &api
     resources:
       limits:
         cpus: '0.45'
-        memory: 110M
+        memory: 165M
 
 services:
   api1:
@@ -47,7 +47,7 @@ services:
       resources:
         limits:
           cpus: '0.10'
-          memory: 15M
+          memory: 20M
 
 networks:
   rinha-net:
