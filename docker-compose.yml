@@ -1,10 +1,14 @@
-x-api: &api-defaults
+x-api: &api
   build:
     context: .
   networks: [rinha-net]
   volumes:
     - sockets:/tmp/sockets
-  depends_on: []
+  healthcheck:
+    test: ['CMD-SHELL', 'test -S "$$RINHA_SOCKET"']
+    interval: 1s
+    timeout: 1s
+    retries: 30
   deploy:
     resources:
       limits:
@@ -13,30 +17,18 @@ x-api: &api-defaults
 
 services:
   api1:
-    <<: *api-defaults
+    <<: *api
     container_name: api-1
     environment:
       RINHA_SOCKET: /tmp/sockets/api1.sock
-      RINHA_DATA_DIR: /app/data
       RINHA_NPROBE: ${RINHA_NPROBE:-8}
-    healthcheck:
-      test: ['CMD', 'test', '-S', '/tmp/sockets/api1.sock']
-      interval: 1s
-      timeout: 1s
-      retries: 30
 
   api2:
-    <<: *api-defaults
+    <<: *api
     container_name: api-2
     environment:
       RINHA_SOCKET: /tmp/sockets/api2.sock
-      RINHA_DATA_DIR: /app/data
       RINHA_NPROBE: ${RINHA_NPROBE:-8}
-    healthcheck:
-      test: ['CMD', 'test', '-S', '/tmp/sockets/api2.sock']
-      interval: 1s
-      timeout: 1s
-      retries: 30
 
   haproxy:
     image: haproxy:3.0-alpine
