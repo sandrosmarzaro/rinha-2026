@@ -59,7 +59,7 @@ def load_partitioned_index(
     for path in faiss_dir.glob('*.faiss'):
         key = int(path.stem)
         idx = faiss.read_index(str(path), faiss.IO_FLAG_MMAP)
-        with contextlib.suppress(AttributeError, RuntimeError):
+        if isinstance(idx, faiss.IndexIVF):
             idx.nprobe = nprobe
         faiss_indices[key] = idx
 

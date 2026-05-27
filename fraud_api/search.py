@@ -34,6 +34,7 @@ def partitioned_score(
     end = int(index.boundaries[real_key + 1])
     part_labels = index.labels[start:end]
     idx = index.faiss_indices[real_key]
+    assert idx is not None  # non-homogeneous partitions always have an index
     q = np.ascontiguousarray(query[None, :], dtype=np.float32)
     _, neighbors = idx.search(q, k)
     return float(part_labels[neighbors[0]].sum()) / k
