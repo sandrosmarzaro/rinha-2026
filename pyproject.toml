@@ -1,0 +1,36 @@
+[project]
+name = "fraud-api"
+version = "0.1.0"
+description = "Rinha de Backend 2026 — fraud detection via vector search"
+requires-python = ">=3.14"
+dependencies = [
+    "starlette>=0.46.0",
+    "msgspec>=0.18.6",
+    "granian>=1.7.0",
+    "numpy>=2.1.0",
+    "loguru>=0.7.3",
+    "faiss-cpu>=1.14.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "httpx>=0.28.0",
+    "ruff>=0.11.0",
+    "zuban>=0.7.2",
+    "pre-commit>=4.0.0",
+    "taskipy>=1.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.taskipy.tasks]
+lint = "ruff check ."
+"lint:fix" = "ruff check . --fix"
+format = "ruff format ."
+"format:check" = "ruff format --check ."
+typecheck = "zuban check"
+test = "pytest"
+check = "task lint && task format:check && task typecheck && task test"
+run = "granian --interface asgi --uds /tmp/sockets/api.sock fraud_api.app:app"
