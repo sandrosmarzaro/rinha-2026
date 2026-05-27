@@ -13,5 +13,5 @@
     "Starlette",
     "HAProxy"
   ],
-  "open-to-work": true
+  "open_to_work": true
 }
