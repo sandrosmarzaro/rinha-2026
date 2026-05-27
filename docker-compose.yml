@@ -1,0 +1,70 @@
+x-api: &api-defaults
+  build:
+    context: .
+  networks: [rinha-net]
+  volumes:
+    - sockets:/tmp/sockets
+  depends_on: []
+  deploy:
+    resources:
+      limits:
+        cpus: '0.45'
+        memory: 110M
+
+services:
+  api1:
+    <<: *api-defaults
+    container_name: api-1
+    environment:
+      RINHA_SOCKET: /tmp/sockets/api1.sock
+      RINHA_DATA_DIR: /app/data
+      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+    healthcheck:
+      test: ['CMD', 'test', '-S', '/tmp/sockets/api1.sock']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  api2:
+    <<: *api-defaults
+    container_name: api-2
+    environment:
+      RINHA_SOCKET: /tmp/sockets/api2.sock
+      RINHA_DATA_DIR: /app/data
+      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+    healthcheck:
+      test: ['CMD', 'test', '-S', '/tmp/sockets/api2.sock']
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  haproxy:
+    image: haproxy:3.0-alpine
+    container_name: load-balancer
+    networks: [rinha-net]
+    ports:
+      - '9999:9999'
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sockets:/tmp/sockets
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 15M
+
+networks:
+  rinha-net:
+    driver: bridge
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
