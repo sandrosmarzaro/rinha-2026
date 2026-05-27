@@ -1,0 +1,66 @@
+# Rinha-hardware simulation rig (NOT for submission).
+# Throttles API CPU quota to push the system into the same saturated regime as the
+# Mac Mini 2014 (2.6 GHz Haswell) so local k6 reproduces the real p99. Calibrate via
+#   SIM_API_CPUS=<per-api> SIM_LB_CPUS=<lb> docker compose -f docker-compose.sim.yml up -d
+x-api: &api
+  build:
+    context: .
+  networks: [rinha-net]
+  volumes:
+    - sockets:/tmp/sockets
+  healthcheck:
+    test: ['CMD-SHELL', 'test -S "$$RINHA_SOCKET"']
+    interval: 1s
+    timeout: 1s
+    retries: 30
+  deploy:
+    resources:
+      limits:
+        cpus: '${SIM_API_CPUS:-0.15}'
+        memory: 165M
+
+services:
+  api1:
+    <<: *api
+    container_name: api-1
+    environment:
+      RINHA_SOCKET: /tmp/sockets/api1.sock
+      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+
+  api2:
+    <<: *api
+    container_name: api-2
+    environment:
+      RINHA_SOCKET: /tmp/sockets/api2.sock
+      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+
+  haproxy:
+    image: haproxy:3.0-alpine
+    container_name: load-balancer
+    networks: [rinha-net]
+    ports:
+      - '9999:9999'
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sockets:/tmp/sockets
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '${SIM_LB_CPUS:-0.10}'
+          memory: 20M
+
+networks:
+  rinha-net:
+    driver: bridge
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
