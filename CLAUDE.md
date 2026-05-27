@@ -19,13 +19,20 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-p99 ~0.88 ms (crava o teto +3000), failure ~1.74%, detecção ~571 → **final ~+3571**.
-Latência no teto; o gargalo é detecção.
+**Score real (hardware da Rinha): ~738.** Prévia oficial: p99 **692 ms** (p99_score só 160),
+detecção 578, failure 1.73%, 0 http_errors. **O gargalo é LATÊNCIA, não detecção.**
+
+O k6 local numa CPU moderna dá p99 ~0.9 ms / final ~3571 — **enganoso**: o hardware da Rinha
+é um Mac Mini 2014 (Haswell 2.6 GHz), bem mais lento. Sob 900 RPS as APIs (Faiss/Python)
+ficam CPU-bound e a fila estoura o p99. Reproduzir local: `docker-compose.sim.yml` com
+`SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o p99 oficial dentro de 0.4%.
 
 ## Findings (não reaprender)
 
-- **Medir SÓ com o k6 oficial.** Bench isolado mente: numpy brute-force parecia ok (~19 ms
-  isolado) mas deu **-6000** sob carga — query CPU-bound de ~15 ms enfila a 900 RPS em 1 CPU.
+- **Medir no hardware certo.** Bench isolado mente (numpy brute-force parecia ok ~19 ms mas
+  deu **-6000** sob carga). E o k6 local numa CPU rápida TAMBÉM mente: a quota de CPU do
+  Docker limita fração de tempo, não a velocidade do core. Só a máquina lenta da Rinha (ou o
+  `docker-compose.sim.yml` calibrado) revela o p99 real sob saturação.
 - **Faiss IVFFlat + mmap** (`read_index(IO_FLAG_MMAP)`): ~0.3 ms/query, page cache
   compartilhado entre os 2 workers. Os vetores moram no índice (não guardar `.npy` separado).
 - **faiss-cpu não tem wheel musllinux** → base Docker `python:3.14-slim`, NÃO alpine.
