@@ -1,0 +1,17 @@
+{
+  "participants": [
+    "Sandro Smarzaro"
+  ],
+  "social": [
+    "https://www.linkedin.com/in/sandrosmarzaro",
+    "https://github.com/sandrosmarzaro",
+    "https://x.com/sandrosmarzaro"
+  ],
+  "source-code-repo": "https://github.com/sandrosmarzaro/rinha-2026",
+  "stack": [
+    "Python",
+    "Starlette",
+    "HAProxy"
+  ],
+  "open_to_work": true
+}
