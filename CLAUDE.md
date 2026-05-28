@@ -57,8 +57,11 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → **1697** (+ fail-safe no han
   no handler retornando o response de "fraude" (approved=False, score=1.0) custou +169 no
   real (1528 → 1697) — o sim local não pega porque o `test-data.json` não tem os mesmos
   edge cases do oficial.
-- **Teto de detecção do KNN ≈ 600.** Para superar: modelo treinado offline (GBDT/MLP) sobre
-  `references.json.gz`. Está no backlog (`docs/PRD.md` §10).
+- **KNN k=5 EXATO dá 100% de accuracy sobre as references** (verificado em 2000 queries do
+  test-data via brute-force BLAS, 0 TP/TN/FP/FN). Não tem regra escondida, não tem teto do
+  KNN: o teto é a APROXIMAÇÃO do IVF. nprobe=1 perde ~1.7% das queries por amostrar a lista
+  errada. Quanto mais nprobe, melhor recall e detecção — mas latência destrói o p99 no
+  Haswell. Em Python+Faiss a tradeoff é dura: o teto efetivo fica ~2000-2500.
 - **`ruff format` quebra `except (A, B):`** virando sintaxe inválida → usar
   `contextlib.suppress(...)`.
 - **docker compose** roda imagem velha sem `--build`; o sweep de nprobe builda uma vez no início.
