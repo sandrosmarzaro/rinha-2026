@@ -1,5 +1,6 @@
 import os
 
+import faiss
 import numpy as np
 
 from fraud_api.index import PartitionedIndex
@@ -10,6 +11,12 @@ K_NEIGHBORS: int = 5
 # latency under saturation; tuned on the rig — larger values recover more recall
 # but inflate p99. Env override for sweeping.
 MAX_EXTRA_PARTITIONS: int = int(os.environ.get('RINHA_MAX_EXTRA', '8'))
+
+# Asymmetric nprobe for the cross-partition extras: extras are already filtered by the
+# bbox lower-bound to be candidates worth visiting, so it pays to scan deeper inside them
+# than in the primary (where unanimous-exit handles the easy bulk). Rig sweep found 3 to
+# be the peak vs primary=2 (cap=8): beyond 3 the latency cost overtakes the recall gain.
+EXTRAS_NPROBE: int = int(os.environ.get('RINHA_EXTRAS_NPROBE') or '3')
 
 
 def brute_force_score(
@@ -89,6 +96,8 @@ def partitioned_score(
         start_q = int(index.boundaries[p])
         end_q = int(index.boundaries[p + 1])
         labels_q = index.labels[start_q:end_q]
+        if isinstance(idx_q, faiss.IndexIVF):
+            idx_q.nprobe = EXTRAS_NPROBE
         dists_q, ids_q = idx_q.search(q, k)
         for di, ii in zip(dists_q[0], ids_q[0], strict=True):
             cand_dists.append(float(di))
