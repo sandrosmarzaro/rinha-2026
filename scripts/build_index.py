@@ -68,7 +68,7 @@ def _is_fresh() -> bool:
     return all(p.stat().st_mtime >= src_mtime for p in paths)
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915 - linear pipeline, splitting would obscure the flow
     if _is_fresh():
         logger.info('index is fresh, skipping rebuild')
         return 0
@@ -116,11 +116,20 @@ def main() -> int:
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
     logger.info('building Faiss indices…')
+    # Per-partition axis-aligned bbox (min/max in each dim) for cross-partition
+    # lower-bound pruning at query time. Empty partitions get inert bbox.
+    bbox_min = np.full((N_PARTITIONS, VECTOR_DIM), np.inf, dtype=np.float32)
+    bbox_max = np.full((N_PARTITIONS, VECTOR_DIM), -np.inf, dtype=np.float32)
     for k in range(N_PARTITIONS):
         start, end = int(boundaries[k]), int(boundaries[k + 1])
-        if start == end or homogeneous_score[k] >= 0:
+        if start == end:
             continue
-        part_vectors = np.ascontiguousarray(vectors_sorted[start:end], dtype=np.float32)
+        block = vectors_sorted[start:end]
+        bbox_min[k] = block.min(axis=0)
+        bbox_max[k] = block.max(axis=0)
+        if homogeneous_score[k] >= 0:
+            continue
+        part_vectors = np.ascontiguousarray(block, dtype=np.float32)
         _build_partition_index(part_vectors, FAISS_DIR / f'{k:03d}.faiss')
 
     logger.info('writing {}', LABELS_PATH)
@@ -132,6 +141,8 @@ def main() -> int:
         'boundaries': boundaries.tolist(),
         'fallbacks': fallbacks.tolist(),
         'homogeneous_score': homogeneous_score.tolist(),
+        'bbox_min': bbox_min.tolist(),
+        'bbox_max': bbox_max.tolist(),
         'ivf_nprobe': IVF_NPROBE,
     }
     META_PATH.write_bytes(msgspec.json.encode(meta))

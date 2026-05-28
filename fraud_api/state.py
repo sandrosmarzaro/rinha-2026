@@ -44,11 +44,16 @@ def _build_synthetic_index() -> PartitionedIndex:
     boundaries = np.searchsorted(sorted_keys, np.arange(N_PARTITIONS + 1)).astype(np.uint32)
 
     homogeneous_score = np.full(N_PARTITIONS, -1.0, dtype=np.float32)
+    bbox_min = np.full((N_PARTITIONS, VECTOR_DIM), np.inf, dtype=np.float32)
+    bbox_max = np.full((N_PARTITIONS, VECTOR_DIM), -np.inf, dtype=np.float32)
     faiss_indices: list[faiss.Index | None] = [None] * N_PARTITIONS
     for k in range(N_PARTITIONS):
         start, end = int(boundaries[k]), int(boundaries[k + 1])
         if start == end:
             continue
+        block = sorted_vectors[start:end]
+        bbox_min[k] = block.min(axis=0)
+        bbox_max[k] = block.max(axis=0)
         fraud_count = int(sorted_labels[start:end].sum())
         if fraud_count == 0:
             homogeneous_score[k] = 0.0
@@ -57,7 +62,7 @@ def _build_synthetic_index() -> PartitionedIndex:
             homogeneous_score[k] = 1.0
             continue
         idx = faiss.IndexFlatL2(VECTOR_DIM)
-        idx.add(np.ascontiguousarray(sorted_vectors[start:end], dtype=np.float32))
+        idx.add(np.ascontiguousarray(block, dtype=np.float32))
         faiss_indices[k] = idx
 
     return PartitionedIndex(
@@ -65,6 +70,8 @@ def _build_synthetic_index() -> PartitionedIndex:
         boundaries=boundaries,
         fallbacks=compute_fallbacks(boundaries),
         homogeneous_score=homogeneous_score,
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
         faiss_indices=tuple(faiss_indices),
         ivf_nprobe=SYNTHETIC_NPROBE,
     )

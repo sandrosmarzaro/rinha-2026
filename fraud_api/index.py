@@ -39,6 +39,8 @@ class PartitionedIndex:
     boundaries: np.ndarray  # (N_PARTITIONS + 1,) uint32, partition start offsets
     fallbacks: np.ndarray  # (N_PARTITIONS,) uint8, redirect empties to nearest non-empty
     homogeneous_score: np.ndarray  # (N_PARTITIONS,) float32, ≥0 if all labels match
+    bbox_min: np.ndarray  # (N_PARTITIONS, DIM) float32, per-partition axis-aligned bound
+    bbox_max: np.ndarray  # (N_PARTITIONS, DIM) float32
     faiss_indices: tuple[faiss.Index | None, ...]  # one Faiss index per partition (mmapped)
     ivf_nprobe: int
 
@@ -68,6 +70,8 @@ def load_partitioned_index(
         boundaries=np.asarray(meta['boundaries'], dtype=np.uint32),
         fallbacks=np.asarray(meta['fallbacks'], dtype=np.uint8),
         homogeneous_score=np.asarray(meta['homogeneous_score'], dtype=np.float32),
+        bbox_min=np.asarray(meta['bbox_min'], dtype=np.float32),
+        bbox_max=np.asarray(meta['bbox_max'], dtype=np.float32),
         faiss_indices=tuple(faiss_indices),
         ivf_nprobe=nprobe,
     )

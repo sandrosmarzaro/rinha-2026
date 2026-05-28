@@ -26,6 +26,7 @@ services:
     environment:
       RINHA_SOCKET: /tmp/sockets/api1.sock
       RINHA_NPROBE: ${RINHA_NPROBE:-1}
+      RINHA_MAX_EXTRA: ${RINHA_MAX_EXTRA:-2}
 
   api2:
     <<: *api
@@ -33,6 +34,7 @@ services:
     environment:
       RINHA_SOCKET: /tmp/sockets/api2.sock
       RINHA_NPROBE: ${RINHA_NPROBE:-1}
+      RINHA_MAX_EXTRA: ${RINHA_MAX_EXTRA:-2}
 
   haproxy:
     image: haproxy:3.0-alpine
