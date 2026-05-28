@@ -38,7 +38,7 @@ META_PATH = INDEX_DIR / 'meta.json'
 VECTOR_DIM = 14
 IVF_NLIST_DIVISOR = 400
 IVF_NLIST_MAX = 1024
-IVF_NPROBE = 1
+IVF_NPROBE = 2
 
 
 def _ivf_nlist(n_vectors: int) -> int:
