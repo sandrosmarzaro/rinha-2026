@@ -19,9 +19,11 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): ~2921.** Prévia oficial #7152: p99 87 ms (p99_score 1061),
-detecção 1860 (rate 2541, penalty −681), failure 0.20%, 0 http_errors. TP/TN/FP/FN =
-23914/30039/78/28. Gargalo restante: latência sob saturação no Haswell.
+**Score real (hardware da Rinha): ~3045.** Prévia oficial #7179: p99 100 ms (p99_score 1002),
+detecção 2043 (rate 2664, penalty −621), failure 0.14%, 0 http_errors. TP/TN/FP/FN =
+23909/30059/51/22 — só 73 misclassifications totais. Gargalo restante: latência (p99_score
+1002/3000 vs detecção 2043/~3000 já perto do teto prático). Detecção provavelmente quase no
+chão de ruído intrínseco do dataset.
 
 O k6 local numa CPU moderna dá p99 ~0.9 ms / final ~3571 — **enganoso**: o hardware da Rinha
 é um Mac Mini 2014 (Haswell 2.6 GHz), bem mais lento. Sob 900 RPS as APIs (Faiss/Python)
@@ -29,7 +31,7 @@ ficam CPU-bound e a fila estoura o p99. Reproduzir local: `docker-compose.sim.ym
 `SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o oficial dentro de ~5%.
 
 Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 (+ bbox-prune) →
-**2921** (nprobe=2, recovers recall on cross-partition extras).
+2921 (nprobe=2) → **3045** (asymmetric extras_nprobe=3).
 
 ## Findings (não reaprender)
 
@@ -47,8 +49,14 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 
   Sob nprobe-only (sem bbox): nprobe=1 venceu (+790 vs nprobe=8: 738→1528) — cada lista IVF
   extra vira latência direta sob saturação. Depois do bbox-prune + unanimous-exit os fáceis
   saem rápido, então sobra orçamento pra recall maior nos boundaries: nprobe=2 com cap=8
-  bate nprobe=1 cap=8 por +441 no rig (2480→2768; real 2512→2921). nprobe=4 piora (latência
-  sobe mais que detecção sobe). Toda vez que mudar bbox/cap, re-sweepar nprobe no rig.
+  bate nprobe=1 cap=8 por +441 no rig. Toda vez que mudar bbox/cap, re-sweepar nprobe.
+- **Asymmetric nprobe entre primary e extras**: a primária paga a vasta maioria das queries
+  via unanimous-exit, então custo dela domina o p99 (mantém nprobe=2). Os extras só rodam em
+  queries ambíguas após filtro do bbox — vale a pena cavar mais fundo neles. Sweep no rig
+  fixou `RINHA_EXTRAS_NPROBE=3` como ótimo (rig +38 vs inherit=2, real +124: 2921→3045).
+  Subir extras a 4 ou 5 destrói o p99 sem ganho de detecção. **Levers que pareciam óbvios e
+  não moveram nada**: padding 14→16 dim (SIMD alinhado), pruning tightness factor (< ou >
+  1.0). Os experimentos confirmam que o tradeoff dominante é recall-vs-latência nos extras.
 - **Levers estruturais que falharam** (rig calibrado):
   - Partição mais fina (512 chaves, amount em 3 bits): topo do amount é denso pelo clamp em
     10000 → split de só 26% no max, mas vizinhos se separam entre partições → recall caiu
