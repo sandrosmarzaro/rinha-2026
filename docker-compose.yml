@@ -21,14 +21,14 @@ services:
     container_name: api-1
     environment:
       RINHA_SOCKET: /tmp/sockets/api1.sock
-      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+      RINHA_NPROBE: ${RINHA_NPROBE:-1}
 
   api2:
     <<: *api
     container_name: api-2
     environment:
       RINHA_SOCKET: /tmp/sockets/api2.sock
-      RINHA_NPROBE: ${RINHA_NPROBE:-8}
+      RINHA_NPROBE: ${RINHA_NPROBE:-1}
 
   haproxy:
     image: haproxy:3.0-alpine
