@@ -20,8 +20,8 @@ pré-renderizada (só 6 scores possíveis).
 ## Estado atual
 
 **Score real (hardware da Rinha): ~1697.** Prévia oficial #7063: p99 73 ms (p99_score 1137),
-detecção 560 (rate 1523, penalty −963), failure 1.77%, 0 http_errors. Gargalo restante: latência
-sob saturação no Haswell. Subir além daqui exige eliminar a busca (modelo treinado offline).
+detecção 560 (rate 1523, penalty −963), failure 1.77%, 0 http_errors. Gargalo restante: **recall
+do IVF aproximado** — nprobe=1 perde ~1.7% das queries por amostrar a lista errada. Teto efetivo nessa stack: ~2000-2500.
 
 O k6 local numa CPU moderna dá p99 ~0.9 ms / final ~3571 — **enganoso**: o hardware da Rinha
 é um Mac Mini 2014 (Haswell 2.6 GHz), bem mais lento. Sob 900 RPS as APIs (Faiss/Python)
