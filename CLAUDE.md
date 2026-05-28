@@ -19,16 +19,16 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): ~1697.** Prévia oficial #7063: p99 73 ms (p99_score 1137),
-detecção 560 (rate 1523, penalty −963), failure 1.77%, 0 http_errors. Gargalo restante: **recall
-do IVF aproximado** — nprobe=1 perde ~1.7% das queries por amostrar a lista errada. Teto efetivo nessa stack: ~2000-2500.
+**Score real (hardware da Rinha): ~2512.** Prévia oficial #7134: p99 74 ms (p99_score 1129),
+detecção 1383 (rate 2157, penalty −773), failure 0.41%, 0 http_errors. TP/TN/FP/FN =
+23863/29977/140/79. Gargalo restante: latência sob saturação no Haswell.
 
 O k6 local numa CPU moderna dá p99 ~0.9 ms / final ~3571 — **enganoso**: o hardware da Rinha
 é um Mac Mini 2014 (Haswell 2.6 GHz), bem mais lento. Sob 900 RPS as APIs (Faiss/Python)
 ficam CPU-bound e a fila estoura o p99. Reproduzir local: `docker-compose.sim.yml` com
-`SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o p99 e o final dentro de ~1%.
+`SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o oficial dentro de ~2%.
 
-Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → **1697** (+ fail-safe no handler).
+Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → **2512** (+ bbox-prune).
 
 ## Findings (não reaprender)
 
@@ -52,6 +52,10 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → **1697** (+ fail-safe no han
     mais que a latência ganhou. **Regressão.**
   - Quantizador grosso HNSW (`IndexHNSWFlat` no IVF): `IndexFlatL2` em 14-dim já é SIMD,
     o passo grosso não dominava. ~30 µs vs ~30 µs. **Sem ganho.**
+  - `IndexFlatL2` puro por partição (KNN exato dentro): satura o Haswell catastroficamente,
+    93% timeout, **-6000**.
+  - Feature weights por dim usando `|ρ|` (correlação com label): com métrica uniforme já
+    100% acurada, qualquer perturbação só piora os k-vizinhos. **Regressão (-116).**
 - **Handler precisa ser fail-safe.** Qualquer exception não tratada (timestamp esquisito,
   payload malformado) vira 500 → http_errors pesa **5×** no E (vs FP=1, FN=3). Try/except
   no handler retornando o response de "fraude" (approved=False, score=1.0) custou +169 no
@@ -59,9 +63,18 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → **1697** (+ fail-safe no han
   edge cases do oficial.
 - **KNN k=5 EXATO dá 100% de accuracy sobre as references** (verificado em 2000 queries do
   test-data via brute-force BLAS, 0 TP/TN/FP/FN). Não tem regra escondida, não tem teto do
-  KNN: o teto é a APROXIMAÇÃO do IVF. nprobe=1 perde ~1.7% das queries por amostrar a lista
-  errada. Quanto mais nprobe, melhor recall e detecção — mas latência destrói o p99 no
-  Haswell. Em Python+Faiss a tradeoff é dura: o teto efetivo fica ~2000-2500.
+  KNN: o teto era a APROXIMAÇÃO do IVF. nprobe=1 perde ~1.7% das queries por amostrar a
+  lista errada — o bbox pruning cross-partition recupera quase tudo (1.77% → 0.41% failure).
+- **Bounding-box pruning cross-partition** (em `search.py`): salva `min`/`max` por dim por
+  partição em `meta.json`; em runtime, depois da primária, calcula `lb_sq = ||q − bbox||²`
+  vetorizado e visita só partições com `lb_sq < worst-of-top-K`, com merge incremental
+  dos top-K e cap `RINHA_MAX_EXTRA` (default 8). Sozinho custa ~127 pts de latência por
+  query (`np.maximum`/`einsum`/`argsort`) → emparelhado com **early-exit por voto unânime**
+  na primária para queries de alta confiança pularem o sweep. Combo deu **+815 no real**
+  (1697 → 2512), detecção 560 → 1383, p99 quase inalterado.
+- **Tag `:latest` no Docker Hub não força re-pull no runner da Rinha.** Sempre re-taggear
+  cada imagem nova com o SHA curto do commit e fazer pin no `submission/docker-compose.yml`.
+  Senão o runner re-usa imagem cacheada e o resultado idêntico ao anterior mascara o teste.
 - **`ruff format` quebra `except (A, B):`** virando sintaxe inválida → usar
   `contextlib.suppress(...)`.
 - **docker compose** roda imagem velha sem `--build`; o sweep de nprobe builda uma vez no início.
