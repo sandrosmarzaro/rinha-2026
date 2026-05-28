@@ -34,10 +34,13 @@ async def ready(_request: Request) -> Response:
 
 
 async def fraud_score(request: Request) -> Response:
-    data: AppData = request.app.state.data
-    body = await request.body()
-    payload = _DECODER.decode(body)
-    q = vectorize(payload, data.mcc_risk)
-    key = partition_key(q)
-    score = partitioned_score(q, key, data.index)
-    return _RESPONSES[round(score * K_NEIGHBORS)]
+    try:
+        data: AppData = request.app.state.data
+        body = await request.body()
+        payload = _DECODER.decode(body)
+        q = vectorize(payload, data.mcc_risk)
+        key = partition_key(q)
+        score = partitioned_score(q, key, data.index)
+        return _RESPONSES[round(score * K_NEIGHBORS)]
+    except Exception:  # noqa: BLE001 — fail-safe: any error → fraud default (avoids HTTP 500)
+        return _RESPONSES[K_NEIGHBORS]
