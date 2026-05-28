@@ -19,16 +19,17 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): ~2512.** Prévia oficial #7134: p99 74 ms (p99_score 1129),
-detecção 1383 (rate 2157, penalty −773), failure 0.41%, 0 http_errors. TP/TN/FP/FN =
-23863/29977/140/79. Gargalo restante: latência sob saturação no Haswell.
+**Score real (hardware da Rinha): ~2921.** Prévia oficial #7152: p99 87 ms (p99_score 1061),
+detecção 1860 (rate 2541, penalty −681), failure 0.20%, 0 http_errors. TP/TN/FP/FN =
+23914/30039/78/28. Gargalo restante: latência sob saturação no Haswell.
 
 O k6 local numa CPU moderna dá p99 ~0.9 ms / final ~3571 — **enganoso**: o hardware da Rinha
 é um Mac Mini 2014 (Haswell 2.6 GHz), bem mais lento. Sob 900 RPS as APIs (Faiss/Python)
 ficam CPU-bound e a fila estoura o p99. Reproduzir local: `docker-compose.sim.yml` com
-`SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o oficial dentro de ~2%.
+`SIM_API_CPUS=0.15 SIM_LB_CPUS=0.10` bate o oficial dentro de ~5%.
 
-Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → **2512** (+ bbox-prune).
+Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 (+ bbox-prune) →
+**2921** (nprobe=2, recovers recall on cross-partition extras).
 
 ## Findings (não reaprender)
 
@@ -42,10 +43,12 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → **251
 - **scipy cKDTree** converte para float64 interno (estoura RAM) e é incompatível com mmap.
   Descartado.
 - **int16** exige `astype(int32)` por query → aloca no hot path → lento. float32 + BLAS vence.
-- **nprobe=1 é o ótimo no hardware real** (baked em `build_index.py`). Cada lista IVF a mais
-  varrida vira latência direta sob saturação no Haswell. nprobe=1 deu +790 vs nprobe=8 (738 →
-  1528). Perdeu ~25 de detecção, ganhou ~930 de p99_score. Sweep e calibração no rig casam
-  com o oficial dentro de ~1%.
+- **nprobe muda de ótimo conforme o resto do search evolui** (baked em `build_index.py`).
+  Sob nprobe-only (sem bbox): nprobe=1 venceu (+790 vs nprobe=8: 738→1528) — cada lista IVF
+  extra vira latência direta sob saturação. Depois do bbox-prune + unanimous-exit os fáceis
+  saem rápido, então sobra orçamento pra recall maior nos boundaries: nprobe=2 com cap=8
+  bate nprobe=1 cap=8 por +441 no rig (2480→2768; real 2512→2921). nprobe=4 piora (latência
+  sobe mais que detecção sobe). Toda vez que mudar bbox/cap, re-sweepar nprobe no rig.
 - **Levers estruturais que falharam** (rig calibrado):
   - Partição mais fina (512 chaves, amount em 3 bits): topo do amount é denso pelo clamp em
     10000 → split de só 26% no max, mas vizinhos se separam entre partições → recall caiu
@@ -61,10 +64,14 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → **251
   no handler retornando o response de "fraude" (approved=False, score=1.0) custou +169 no
   real (1528 → 1697) — o sim local não pega porque o `test-data.json` não tem os mesmos
   edge cases do oficial.
+- **Env override em compose vence o bake silenciosamente.** O `submission/docker-compose.yml`
+  tinha `RINHA_NPROBE:-1` quando bakei `IVF_NPROBE=2` no meta — runner usou 1 e mascarou o
+  ganho. Regra: submission roda do bake direto, **sem env de tuning**; sim mantém envs pra
+  sweeps; mudou bake → remover/atualizar a env em compose. Source of truth = `meta.json`.
 - **KNN k=5 EXATO dá 100% de accuracy sobre as references** (verificado em 2000 queries do
   test-data via brute-force BLAS, 0 TP/TN/FP/FN). Não tem regra escondida, não tem teto do
-  KNN: o teto era a APROXIMAÇÃO do IVF. nprobe=1 perde ~1.7% das queries por amostrar a
-  lista errada — o bbox pruning cross-partition recupera quase tudo (1.77% → 0.41% failure).
+  KNN: o teto era a APROXIMAÇÃO do IVF. A combinação nprobe=2 + bbox cross-partition +
+  unanimous-exit recupera quase todo o recall perdido (1.77% → 0.20% failure).
 - **Bounding-box pruning cross-partition** (em `search.py`): salva `min`/`max` por dim por
   partição em `meta.json`; em runtime, depois da primária, calcula `lb_sq = ||q − bbox||²`
   vetorizado e visita só partições com `lb_sq < worst-of-top-K`, com merge incremental
