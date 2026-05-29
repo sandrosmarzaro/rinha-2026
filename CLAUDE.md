@@ -19,11 +19,9 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): ~3045.** Prévia oficial #7179: p99 100 ms (p99_score 1002),
-detecção 2043 (rate 2664, penalty −621), failure 0.14%, 0 http_errors. TP/TN/FP/FN =
-23909/30059/51/22 — só 73 misclassifications totais. Gargalo restante: latência (p99_score
-1002/3000 vs detecção 2043/~3000 já perto do teto prático). Detecção provavelmente quase no
-chão de ruído intrínseco do dataset.
+**Score real (hardware da Rinha): ~3233.** Prévia oficial #7218: p99 65 ms (p99_score 1190),
+detecção 2043, failure 0.15%, 0 http_errors. TP/TN/FP/FN = 23924/30054/63/18. Gargalo
+restante: latência (p99_score 1190/3000) — detecção já no patamar prático.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo `zanfranceschi/
 rinha-de-backend-2026`. Ilimitada por design da Rinha. **Não rodar sim local** — quota de
@@ -34,7 +32,7 @@ duas prévias com o mesmo binário pra ter banda de variância, comparar contra 
 da versão anterior.
 
 Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 (+ bbox-prune) →
-2921 (nprobe=2) → **3045** (asymmetric extras_nprobe=3).
+2921 (nprobe=2) → 3045 (asymmetric extras_nprobe=3) → **3233** (fast-path 2 regras).
 
 ## Findings (não reaprender)
 
@@ -94,6 +92,12 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 
   (mesmo nas unanimes) recupera ~36 wrong-unanime-exits — detecção sobe ~360. Mas o numpy
   per-query sob saturação no Haswell joga p99 de 100ms pra 560-735ms (mesmo com neighbor list
   pré-computada por partição). Net negativo. A imprecisão das unanimes é o preço a pagar.
+- **Fast-path determinístico antes do KNN** (em `handlers.py`): 2 thresholds hand-derivados
+  offline (`amount/avg ≤ 0.971` → legit; `amount > 2996` → fraud) cobrem ~92.6% das queries
+  com 99.99% accuracy em references. Pula vectorize + partition_key + Faiss inteiro pra
+  essas queries — só ~7.4% boundary cai no KNN. Custou +188 real (3045→3233) cortando
+  p99 de 100ms→65ms, **sem perder detecção** (mesmos 2043). A latência saved reduz queue
+  na cauda → menos timeouts → score mais estável entre prévias.
 - **Tag `:latest` no Docker Hub não força re-pull no runner da Rinha.** Sempre re-taggear
   cada imagem nova com o SHA curto do commit e fazer pin no `submission/docker-compose.yml`.
   Senão o runner re-usa imagem cacheada e o resultado idêntico ao anterior mascara o teste.
