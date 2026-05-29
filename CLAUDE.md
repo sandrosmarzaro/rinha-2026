@@ -34,8 +34,50 @@ e 2633 com a MESMA imagem por causa de http_errors do tail). Pra avaliar uma mud
 duas prévias com o mesmo binário pra ter banda de variância, comparar contra duas prévias
 da versão anterior.
 
-Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 (+ bbox-prune) →
-2921 (nprobe=2) → 3045 (asymmetric extras_nprobe=3) → **3233** (fast-path 2 regras).
+## Trajetória completa
+
+Cada nova plateau atingida é registrada aqui na hora — sem precisar instruir, pra
+preservar contra autocompactação. As linhas abaixo são incrementos validados (sim
+calibrado e/ou prévia oficial); cada uma é um commit no repo.
+
+### Mudanças que ficaram
+
+| # | Score | Técnica | Δ | Comprovação |
+|---|---:|---|---:|---|
+| 0 | −6000 | numpy brute-force partitioned (M1-M5 PRD original) | — | k6 oficial: ~15ms/query satura 1 CPU @ 900 RPS → fila → 80% timeout |
+| 1 | 738 | Faiss `IndexIVFFlat` + `mmap` (IO_FLAG_MMAP) por partição, `nprobe=8` | **+6738** | prévia oficial (M6) |
+| 2 | 1528 | `nprobe 8 → 1` (baked em `build_index`) | **+790** | prévia: cada lista IVF a mais era latência pura sob saturação |
+| 3 | 1697 | fail-safe `try/except` no `fraud_score` handler, default = fraud | **+169** | prévia: crashes em payloads edge eliminados (http_errors pesa 5× no E) |
+| 4 | 2512 | bbox `lb_sq` cross-partition + unanime-exit + cap=8 | **+815** | prévia: `min`/`max` por dim em `meta.json`; pula sweep se 5/5 mesma label |
+| 5 | 2921 | `nprobe 1 → 2` (baked) | **+409** | prévia: com bbox+unanime, dá pra cavar mais fundo na primária |
+| 6 | 3045 | asymmetric `EXTRAS_NPROBE=3` (primary fica em 2) | **+124** | prévia: extras só rodam após bbox filter, vale recall maior |
+| 7 | **3190-3233** | fast-path determinístico ANTES do KNN (2 regras hand-derivadas) | **+145-188** | prévias #7218/#7232. `amount/avg ≤ 0.971` → legit; `amount > 2996` → fraud. 92.6% cov 99.99% pureza |
+
+### Descartados (cada um testado, com motivo)
+
+| Tentativa | Resultado | Onde quebrou |
+|---|---:|---|
+| `scipy.spatial.cKDTree` | drop | float64 interno → estoura RAM; incompatível com mmap |
+| int16 quantization (numpy hot path) | -48ms p99 | `astype(int32)` por query aloca 28 MB no hot path |
+| Partição mais fina (512 chaves, amount 3-bit) | -43 sim | topo do amount denso (clamp em 10000) → split só 26%; vizinhos se separam → recall cai mais que latência ganha |
+| HNSW coarse quantizer no IVF (`IndexHNSWFlat`) | 0 | `IndexFlatL2` em 14-dim já é SIMD-vetorizado; coarse step não dominava |
+| `IndexFlatL2` puro por partição (exato dentro) | -6000 sim | KNN exato em ~283k vetores médios não cabe no Haswell saturado, 93% timeout |
+| Feature weights `\|ρ\|` por dim | -116 sim | métrica uniforme já 100% acurada na references → perturbação só piora |
+| Padding 14→16 dim (SIMD alignment) | 0 sim | Faiss alinha internamente; tail handling não era gargalo |
+| Tightness factor no bbox prune (< 1.0 ou > 1.0) | 0/-1000 sim | bbox natural já calibrado; tight<1.0 corta partições críticas, tight>1.0 só adiciona custo |
+| Always-bbox compute + min-lb verified unanime-exit | -460 sim | recupera +360 detecção (36 wrong-unanimes) mas numpy/query sob saturação joga p99 de 100ms pra 560ms |
+| Smart unanime-exit com `homogeneous_score` filter | -390 sim | mesmo problema: bbox-compute por query mata p99 |
+| Neighbor list pré-computada (K=32 por partição) | -510 sim | fancy indexing `bbox_max[neighbors]` ainda custa caro; não baixa bbox-cost |
+| 6-rule fast-path (km_home/installments/km_last/tx24h adicionais) | 0 sim | queries extras eram fáceis pro KNN; saving ~1µs/query, neutro |
+| Decision tree depth=5 sklearn como fast-path | proj. neutro | 2 leaves ≥99.99% pureza cobrem 96.5% (vs 92.6% com 2 regras), adiciona ~36 erros — perfil parecido com 6-rule |
+| `IndexIVFScalarQuantizer` int8 (nprobe=2 e nprobe=4) | -250 sim | quantização introduz erro de boundary irrecuperável; +probes não compensa |
+
+### Fora do constraint do projeto
+
+SIMD AVX2 escrito à mão, custom HTTP via io_uring, FD passing entre processos e busy-poll
+em NAPI renderiam muito, mas violam "Python idiomático sem extensões nativas" e estão fora
+de escopo. Linguagens compiladas em geral conseguem voar com KNN exato e cabem tudo em ~1ms
+no Haswell, fora do nosso teto.
 
 ## Findings (não reaprender)
 
