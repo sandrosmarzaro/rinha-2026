@@ -19,12 +19,12 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): banda 3190-3233.** Duas prévias na mesma imagem
-`:c4d12ec` deram 3233 (#7218) e 3190 (#7232) — jitter ~1.3% só de p99 (64ms vs 72ms),
-detecção cravada em 2043-2048. Failure ~0.15%. **O algoritmo é determinístico**: TP/TN/FP/FN
-em ~23900-23925/30030-30055/62-63/18. Variância maior (vimos -400 no #7213 com 26 http_errors)
-é caso atípico de cauda do runner, não a banda normal. Gargalo: latência (p99_score 1190/3000)
-— detecção já no patamar prático.
+**Score real (hardware da Rinha): banda ~3190-3236.** Quatro prévias na trajetória final
+(fast-path validado em #7218 3233 e #7241 3233, variância em #7232 3190, fp16 storage em
+#7242 3236). Jitter ~1.5% só de p99 (63-72ms); detecção cravada em 2038-2048. Failure ~0.15%.
+**O algoritmo é determinístico**: TP/TN/FP/FN em ~23900-23925/30030-30055/62-64/18. Variância
+maior (vimos -400 no #7213 com 26 http_errors) é caso atípico de cauda do runner, não a banda
+normal. Gargalo: latência (p99_score 1190/3000) — detecção já no patamar prático.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo `zanfranceschi/
 rinha-de-backend-2026`. Ilimitada por design da Rinha. **Não rodar sim local** — quota de
@@ -52,6 +52,7 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 5 | 2921 | `nprobe 1 → 2` (baked) | **+409** | prévia: com bbox+unanime, dá pra cavar mais fundo na primária |
 | 6 | 3045 | asymmetric `EXTRAS_NPROBE=3` (primary fica em 2) | **+124** | prévia: extras só rodam após bbox filter, vale recall maior |
 | 7 | **3190-3233** | fast-path determinístico ANTES do KNN (2 regras hand-derivadas) | **+145-188** | prévias #7218/#7232. `amount/avg ≤ 0.971` → legit; `amount > 2996` → fraud. 92.6% cov 99.99% pureza |
+| 8 | **3236** | `IndexIVFScalarQuantizer` fp16 storage | 0, mem -43% | prévia #7242. Mesma banda (3190-3233) mas index 147→84 MB, working set menor — folga pro tail sob pressão. Faiss decomprime pra float32 pra SIMD distance |
 
 ### Descartados (cada um testado, com motivo)
 
@@ -71,7 +72,6 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 6-rule fast-path (km_home/installments/km_last/tx24h adicionais) | 0 sim | queries extras eram fáceis pro KNN; saving ~1µs/query, neutro |
 | Decision tree depth=5 sklearn como fast-path | proj. neutro | 2 leaves ≥99.99% pureza cobrem 96.5% (vs 92.6% com 2 regras), adiciona ~36 erros — perfil parecido com 6-rule |
 | `IndexIVFScalarQuantizer` int8 (nprobe=2 e nprobe=4) | -250 sim | quantização introduz erro de boundary irrecuperável; +probes não compensa |
-| `IndexIVFScalarQuantizer` fp16 | 0 sim | half memory (147→84MB) mas budget já tinha folga; detection cravada |
 | `IndexRefineFlat` sobre IVFSQ8 (int8 wide + float32 rerank, k_factor=4) | **-6000 sim** | refine vectors carregam em heap (não mmap), 178MB+ por worker estoura budget → OOM → 51k timeouts |
 
 ### Fora do constraint do projeto
