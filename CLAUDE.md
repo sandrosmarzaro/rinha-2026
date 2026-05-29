@@ -101,6 +101,10 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 
 - **Tag `:latest` no Docker Hub não força re-pull no runner da Rinha.** Sempre re-taggear
   cada imagem nova com o SHA curto do commit e fazer pin no `submission/docker-compose.yml`.
   Senão o runner re-usa imagem cacheada e o resultado idêntico ao anterior mascara o teste.
+- **Quota oficial: 10 prévias por dia** (apesar do doc dizer "ilimitadas"). 11ª retorna
+  "Limite de submissões por dia atingido (10/10). Tente novamente amanhã." Orçar bem: pra
+  uma mudança, idealmente 2 prévias do baseline + 2 da nova versão pra confirmar variância
+  e direção. Variância vista ~10-15% entre runs com mesma imagem.
 - **`ruff format` quebra `except (A, B):`** virando sintaxe inválida → usar
   `contextlib.suppress(...)`.
 - **`umask 000`** no entrypoint: HAProxy roda non-root e precisa escrever no UDS compartilhado.
