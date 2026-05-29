@@ -45,10 +45,7 @@ class PartitionedIndex:
     ivf_nprobe: int
 
 
-def load_partitioned_index(
-    index_dir: Path | str,
-    nprobe_override: int | None = None,
-) -> PartitionedIndex:
+def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
     index_dir = Path(index_dir)
     meta = msgspec.json.decode((index_dir / META_FILENAME).read_bytes())
     labels = np.load(index_dir / LABELS_FILENAME, mmap_mode='r')
@@ -56,7 +53,7 @@ def load_partitioned_index(
         labels._mmap.madvise(mmap.MADV_HUGEPAGE | mmap.MADV_WILLNEED)
 
     faiss_dir = index_dir / FAISS_SUBDIR
-    nprobe = nprobe_override if nprobe_override is not None else int(meta.get('ivf_nprobe', 8))
+    nprobe = int(meta.get('ivf_nprobe', 8))
     faiss_indices: list[faiss.Index | None] = [None] * meta['n_partitions']
     for path in faiss_dir.glob('*.faiss'):
         key = int(path.stem)

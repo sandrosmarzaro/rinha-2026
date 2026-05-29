@@ -16,7 +16,6 @@ from fraud_api.partition import N_PARTITIONS, compute_fallbacks, partition_keys_
 from fraud_api.vectorize import VECTOR_DIM
 
 ENV_DATA_DIR: Final = 'RINHA_DATA_DIR'
-ENV_NPROBE: Final = 'RINHA_NPROBE'
 INDEX_SUBDIR: Final = 'index'
 MCC_RISK_FILENAME: Final = 'mcc_risk.json'
 
@@ -78,9 +77,7 @@ def _build_synthetic_index() -> PartitionedIndex:
 
 
 def _from_disk(data_dir: Path) -> AppData:
-    nprobe_env = os.environ.get(ENV_NPROBE)
-    nprobe_override = int(nprobe_env) if nprobe_env else None
-    index = load_partitioned_index(data_dir / INDEX_SUBDIR, nprobe_override=nprobe_override)
+    index = load_partitioned_index(data_dir / INDEX_SUBDIR)
     mcc_risk = load_mcc_risk(data_dir / MCC_RISK_FILENAME)
     n_built = sum(1 for i in index.faiss_indices if i is not None)
     logger.info(
