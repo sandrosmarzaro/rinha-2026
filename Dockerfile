@@ -25,7 +25,8 @@ COPY --from=builder /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     RINHA_DATA_DIR=/app/data \
-    RINHA_SOCKET=/tmp/sockets/api.sock
+    RINHA_SOCKET=/tmp/sockets/api.sock \
+    PYTHONOPTIMIZE=2
 
 WORKDIR /app
 

@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Rinha de Backend 2026 — fraud detection via vector search"
 requires-python = ">=3.14"
 dependencies = [
-    "starlette>=0.46.0",
     "msgspec>=0.18.6",
     "granian>=1.7.0",
     "numpy>=2.1.0",
@@ -15,7 +14,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
-    "httpx>=0.28.0",
     "ruff>=0.11.0",
     "zuban>=0.7.2",
     "pre-commit>=4.0.0",
@@ -33,4 +31,4 @@ format = "ruff format ."
 typecheck = "zuban check"
 test = "pytest"
 check = "task lint && task format:check && task typecheck && task test"
-run = "granian --interface asgi --uds /tmp/sockets/api.sock fraud_api.app:app"
+run = "granian --interface rsgi --http 1 --no-ws --uds /tmp/sockets/api.sock fraud_api.rsgi_app:app"

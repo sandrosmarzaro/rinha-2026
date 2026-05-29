@@ -41,35 +41,31 @@ def partitioned_score(
 
     Searches the query's own partition first, then expands to any other partition
     whose bbox lower-bound (squared L2) is below the current top-K worst distance.
-    Equivalent to exact KNN over the full reference set when pruning is tight, but
-    only visits a handful of partitions per query in practice.
     """
     real_key = int(index.fallbacks[key])
     homogeneous = float(index.homogeneous_score[real_key])
     if homogeneous >= 0.0:
         return homogeneous
 
-    q = np.ascontiguousarray(query[None, :], dtype=np.float32)
+    # query from vectorize() is already float32, C-contig, dim=14 — view as 2D directly
+    q = query[None, :]
     idx_primary = index.faiss_indices[real_key]
-    assert idx_primary is not None  # non-homogeneous partitions always have an index
+    assert idx_primary is not None
     start = int(index.boundaries[real_key])
-    end = int(index.boundaries[real_key + 1])
-    part_labels = index.labels[start:end]
+    part_labels = index.labels[start : int(index.boundaries[real_key + 1])]
     dists_p, ids_p = idx_primary.search(q, k)
 
-    cand_dists: list[float] = [float(d) for d in dists_p[0]]
-    cand_labels: list[int] = [int(part_labels[i]) for i in ids_p[0]]
+    ids0 = ids_p[0]
+    # Fancy-index uint8 labels then check unanime via min/max equality on the K-element
+    # numpy slice — avoids Python list comp + per-element int() casts of the old path.
+    labels_top = part_labels[ids0]
+    if labels_top.min() == labels_top.max():
+        return float(labels_top[0])
 
-    # Unanimous primary vote — skip the cross-partition bbox sweep for high-confidence
-    # queries. The vast majority hit homogeneous-ish neighborhoods; only ambiguous ones
-    # pay the bbox computation + extra partition searches.
-    first = cand_labels[0]
-    if all(lbl == first for lbl in cand_labels):
-        return float(first)
-
+    cand_dists: list[float] = dists_p[0].tolist()
+    cand_labels: list[int] = labels_top.tolist()
     worst = max(cand_dists)
 
-    # bbox lower-bound (squared L2) from query to every partition's axis-aligned box
     diff_high = np.maximum(0.0, query - index.bbox_max)
     diff_low = np.maximum(0.0, index.bbox_min - query)
     lb_sq = np.einsum('ij,ij->i', diff_high, diff_high) + np.einsum(
@@ -87,19 +83,17 @@ def partitioned_score(
         if p == real_key:
             continue
         if float(lb_sq[p]) >= worst:
-            break  # sorted ascending — every remaining partition is too far
+            break
         idx_q = index.faiss_indices[p]
         if idx_q is None:
-            continue  # homogeneous or empty — no faiss index to query
+            continue
         start_q = int(index.boundaries[p])
-        end_q = int(index.boundaries[p + 1])
-        labels_q = index.labels[start_q:end_q]
+        labels_q = index.labels[start_q : int(index.boundaries[p + 1])]
         if isinstance(idx_q, faiss.IndexIVF):
             idx_q.nprobe = EXTRAS_NPROBE
         dists_q, ids_q = idx_q.search(q, k)
-        for di, ii in zip(dists_q[0], ids_q[0], strict=True):
-            cand_dists.append(float(di))
-            cand_labels.append(int(labels_q[ii]))
+        cand_dists.extend(dists_q[0].tolist())
+        cand_labels.extend(labels_q[ids_q[0]].tolist())
         merged = sorted(zip(cand_dists, cand_labels, strict=True))[:k]
         cand_dists = [d for d, _ in merged]
         cand_labels = [lbl for _, lbl in merged]

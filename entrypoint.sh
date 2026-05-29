@@ -8,9 +8,11 @@ rm -f "$RINHA_SOCKET"
 umask 000
 
 exec granian \
-    --interface asgi \
+    --interface rsgi \
     --uds "$RINHA_SOCKET" \
     --workers 1 \
     --runtime-mode st \
+    --http 1 \
+    --no-ws \
     --log-level warning \
-    fraud_api.app:app
+    fraud_api.rsgi_app:app
