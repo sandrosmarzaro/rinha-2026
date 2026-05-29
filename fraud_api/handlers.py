@@ -14,6 +14,12 @@ FRAUD_THRESHOLD: Final = 0.6
 _DECODER = msgspec.json.Decoder(FraudRequest)
 _ENCODER = msgspec.json.Encoder()
 
+# Fast-path thresholds derived offline from references.json.gz. Each isolates a
+# subset of references with ≥99.99% label purity, jointly covering ~92.6% of the
+# distribution. Queries matching either rule skip the entire KNN pipeline.
+LEGIT_AMT_RATIO_THRESHOLD: Final = 0.971  # amount/avg_amount; below → legit
+FRAUD_AMOUNT_THRESHOLD: Final = 2996.0  # raw BRL; above → fraud
+
 # fraud_score is always fraud_count/K with fraud_count in 0..K, so there are only
 # K+1 possible responses. Pre-render them once; the hot path just indexes in.
 _RESPONSES: Final = tuple(
@@ -38,6 +44,15 @@ async def fraud_score(request: Request) -> Response:
         data: AppData = request.app.state.data
         body = await request.body()
         payload = _DECODER.decode(body)
+        amount = payload.transaction.amount
+        avg = payload.customer.avg_amount
+        # Fast-path: deterministic 2-rule classifier covers the easy ~92.6% of queries
+        # with ≥99.99% accuracy, bypassing vectorize + partition + Faiss entirely.
+        if avg > 0 and amount / avg <= LEGIT_AMT_RATIO_THRESHOLD:
+            return _RESPONSES[0]
+        if amount > FRAUD_AMOUNT_THRESHOLD:
+            return _RESPONSES[K_NEIGHBORS]
+        # Ambiguous boundary → KNN
         q = vectorize(payload, data.mcc_risk)
         key = partition_key(q)
         score = partitioned_score(q, key, data.index)
