@@ -53,6 +53,7 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 6 | 3045 | asymmetric `EXTRAS_NPROBE=3` (primary fica em 2) | **+124** | prévia: extras só rodam após bbox filter, vale recall maior |
 | 7 | **3190-3233** | fast-path determinístico ANTES do KNN (2 regras hand-derivadas) | **+145-188** | prévias #7218/#7232. `amount/avg ≤ 0.971` → legit; `amount > 2996` → fraud. 92.6% cov 99.99% pureza |
 | 8 | **3236** | `IndexIVFScalarQuantizer` fp16 storage | 0, mem -43% | prévia #7242. Mesma banda (3190-3233) mas index 147→84 MB, working set menor — folga pro tail sob pressão. Faiss decomprime pra float32 pra SIMD distance |
+| 9 | **3279** | RSGI nativo (drop Starlette/ASGI) + `PYTHONOPTIMIZE=2` + `--http 1 --no-ws` | **+43** | prévia #7292 no `1bc7158`. p99 65→57 ms (-12%). Detection neutra (FP+1). Diff: -279/+24 LOC, removeu starlette dep. Body da issue precisa ser `rinha/test smarzaro-python` (não só o título — runner parsa o body) |
 
 ### Descartados (cada um testado, com motivo)
 
