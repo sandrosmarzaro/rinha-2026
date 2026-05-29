@@ -53,7 +53,15 @@ def _build_partition_index(part_vectors: np.ndarray, path: Path) -> None:
         idx.add(part_vectors)
     else:
         quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-        idx = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, nlist)
+        # fp16 storage: ~halves on-disk index size and memory working set without measurable
+        # accuracy or latency hit — Faiss decompresses to float32 for SIMD distance compute.
+        idx = faiss.IndexIVFScalarQuantizer(
+            quantizer,
+            VECTOR_DIM,
+            nlist,
+            faiss.ScalarQuantizer.QT_fp16,
+            faiss.METRIC_L2,
+        )
         idx.train(part_vectors)
         idx.add(part_vectors)
         idx.nprobe = IVF_NPROBE
