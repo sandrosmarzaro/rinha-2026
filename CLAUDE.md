@@ -19,9 +19,12 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): ~3233.** Prévia oficial #7218: p99 65 ms (p99_score 1190),
-detecção 2043, failure 0.15%, 0 http_errors. TP/TN/FP/FN = 23924/30054/63/18. Gargalo
-restante: latência (p99_score 1190/3000) — detecção já no patamar prático.
+**Score real (hardware da Rinha): banda 3190-3233.** Duas prévias na mesma imagem
+`:c4d12ec` deram 3233 (#7218) e 3190 (#7232) — jitter ~1.3% só de p99 (64ms vs 72ms),
+detecção cravada em 2043-2048. Failure ~0.15%. **O algoritmo é determinístico**: TP/TN/FP/FN
+em ~23900-23925/30030-30055/62-63/18. Variância maior (vimos -400 no #7213 com 26 http_errors)
+é caso atípico de cauda do runner, não a banda normal. Gargalo: latência (p99_score 1190/3000)
+— detecção já no patamar prático.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo `zanfranceschi/
 rinha-de-backend-2026`. Ilimitada por design da Rinha. **Não rodar sim local** — quota de
@@ -96,8 +99,16 @@ Trajetória: 738 (nprobe=8) → 1528 (nprobe=1) → 1697 (+ fail-safe) → 2512 
   offline (`amount/avg ≤ 0.971` → legit; `amount > 2996` → fraud) cobrem ~92.6% das queries
   com 99.99% accuracy em references. Pula vectorize + partition_key + Faiss inteiro pra
   essas queries — só ~7.4% boundary cai no KNN. Custou +188 real (3045→3233) cortando
-  p99 de 100ms→65ms, **sem perder detecção** (mesmos 2043). A latência saved reduz queue
-  na cauda → menos timeouts → score mais estável entre prévias.
+  p99 de 100ms→65ms, **sem perder detecção** (mesmos 2043).
+- **Mais regras de fast-path têm retorno marginal** (testado em sim). Adicionar 4 regras
+  fraude extras (km_home, installments, km_last, tx24h thresholds) leva cobertura pra 96.5%
+  com mesma pureza, mas a fatia extra é facil pro KNN também — só economiza ~1.2µs avg por
+  query no agregado. Sim mostrou neutro. Decision tree depth=5 (sklearn offline) acharia
+  rules similares — projetado igual.
+- **`IndexIVFScalarQuantizer` int8 perde recall irrecuperável**. Testado em sim: nprobe=2
+  caiu de 3232→2969 (-263), nprobe=4 não compensou (2983). A quantização introduz erro de
+  boundary que mais probes não recupera. Index size 147→53MB seria bom mas detection cara
+  demais. Stay float32 IVFFlat.
 - **Tag `:latest` no Docker Hub não força re-pull no runner da Rinha.** Sempre re-taggear
   cada imagem nova com o SHA curto do commit e fazer pin no `submission/docker-compose.yml`.
   Senão o runner re-usa imagem cacheada e o resultado idêntico ao anterior mascara o teste.
