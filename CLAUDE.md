@@ -73,6 +73,8 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | Decision tree depth=5 sklearn como fast-path | proj. neutro | 2 leaves ≥99.99% pureza cobrem 96.5% (vs 92.6% com 2 regras), adiciona ~36 erros — perfil parecido com 6-rule |
 | `IndexIVFScalarQuantizer` int8 (nprobe=2 e nprobe=4) | -250 sim | quantização introduz erro de boundary irrecuperável; +probes não compensa |
 | `IndexRefineFlat` sobre IVFSQ8 (int8 wide + float32 rerank, k_factor=4) | **-6000 sim** | refine vectors carregam em heap (não mmap), 178MB+ por worker estoura budget → OOM → 51k timeouts |
+| Custom rerank em Python sobre `vectors.npy` mmap'd (IVFSQ8 wide + numpy rerank, k_factor=2/4) | -10 sim, +37MB | funciona (sem -6000 do RefineFlat porque mmap), detection +10 (rerank exato recupera int8). Mas p99 +5ms e index 84→221MB. Net negativo vs fp16. **Concept-proven mas pior que baseline.** |
+| Per-cluster bbox via Faiss `invlists`/`search_preassigned` | descartado sem implementar | requer compute por query de bbox lb pra ≤1024 clusters em Python (~5µs/query). Mesmo padrão dos experimentos always-bbox/smart-exit/neighbor-list que perderam: trabalho Python per-query sob saturação no Haswell ampliar p99 mais do que pruning algorítmico salva. Marginal mesmo se ganhasse algo. |
 
 ### Fora do constraint do projeto
 
