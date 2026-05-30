@@ -14,7 +14,7 @@ FRAUD_LABEL = 'fraud'
 
 LABELS_FILENAME = 'labels.npy'
 META_FILENAME = 'meta.json'
-FAISS_SUBDIR = 'faiss'
+GLOBAL_INDEX_FILENAME = 'global.faiss'
 
 
 def load_references(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
@@ -35,13 +35,11 @@ def load_mcc_risk(path: Path | str) -> dict[str, float]:
 
 @dataclass(slots=True, frozen=True)
 class PartitionedIndex:
-    labels: np.ndarray  # (N,) uint8, mmapped, reordered by partition key
+    labels: np.ndarray  # (N,) uint8, mmapped, sorted by partition key (global ids)
     boundaries: np.ndarray  # (N_PARTITIONS + 1,) uint32, partition start offsets
     fallbacks: np.ndarray  # (N_PARTITIONS,) uint8, redirect empties to nearest non-empty
     homogeneous_score: np.ndarray  # (N_PARTITIONS,) float32, ≥0 if all labels match
-    bbox_min: np.ndarray  # (N_PARTITIONS, DIM) float32, per-partition axis-aligned bound
-    bbox_max: np.ndarray  # (N_PARTITIONS, DIM) float32
-    faiss_indices: tuple[faiss.Index | None, ...]  # one Faiss index per partition (mmapped)
+    global_index: faiss.Index  # single IVF over all 3M vectors (mmapped)
     ivf_nprobe: int
 
 
@@ -52,23 +50,19 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
     with contextlib.suppress(AttributeError, OSError, ValueError):
         labels._mmap.madvise(mmap.MADV_HUGEPAGE | mmap.MADV_WILLNEED)
 
-    faiss_dir = index_dir / FAISS_SUBDIR
     nprobe = int(meta.get('ivf_nprobe', 8))
-    faiss_indices: list[faiss.Index | None] = [None] * meta['n_partitions']
-    for path in faiss_dir.glob('*.faiss'):
-        key = int(path.stem)
-        idx = faiss.read_index(str(path), faiss.IO_FLAG_MMAP)
-        if isinstance(idx, faiss.IndexIVF):
-            idx.nprobe = nprobe
-        faiss_indices[key] = idx
+    global_index = faiss.read_index(
+        str(index_dir / GLOBAL_INDEX_FILENAME),
+        faiss.IO_FLAG_MMAP,
+    )
+    if isinstance(global_index, faiss.IndexIVF):
+        global_index.nprobe = nprobe
 
     return PartitionedIndex(
         labels=labels,
         boundaries=np.asarray(meta['boundaries'], dtype=np.uint32),
         fallbacks=np.asarray(meta['fallbacks'], dtype=np.uint8),
         homogeneous_score=np.asarray(meta['homogeneous_score'], dtype=np.float32),
-        bbox_min=np.asarray(meta['bbox_min'], dtype=np.float32),
-        bbox_max=np.asarray(meta['bbox_max'], dtype=np.float32),
-        faiss_indices=tuple(faiss_indices),
+        global_index=global_index,
         ivf_nprobe=nprobe,
     )

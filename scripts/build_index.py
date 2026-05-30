@@ -1,19 +1,22 @@
-"""Build the partitioned IVF index from references.json.gz.
+"""Build the global IVF index from references.json.gz.
 
 Output:
     data/index/
-      labels.npy            uint8 (N,) global label array (reordered by partition key)
-      meta.json             {boundaries, fallbacks, homogeneous_score, …}
-      faiss/<key>.faiss     one Faiss index per non-empty partition (IndexIVFFlat
-                            or IndexFlatL2 for small partitions)
+      labels.npy            uint8 (N,) global label array (sorted by partition key)
+      meta.json             {boundaries, fallbacks, homogeneous_score, ivf_nprobe}
+      global.faiss          single IndexIVFScalarQuantizer (fp16) over all N vectors
 
-The Faiss indices are reloaded at runtime via `faiss.read_index(path, IO_FLAG_MMAP)`
-so two API workers can share the same page cache for the bulk of the data.
+The faiss index is reloaded at runtime via `faiss.read_index(path, IO_FLAG_MMAP)`
+so two API workers can share the same page cache.
+
+Partition data (boundaries, fallbacks, homogeneous_score) is kept only for the
+fast-path homogeneous-partition early-exit; KNN itself runs on the single global
+index. Single-call faiss.search avoids ~150us of Python crossing overhead vs the
+former per-partition + bbox sweep approach.
 
 Idempotent: skips rebuild when index files are newer than the source.
 """
 
-import shutil
 import sys
 from pathlib import Path
 
@@ -30,60 +33,29 @@ from fraud_api.partition import N_PARTITIONS, compute_fallbacks, partition_keys_
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'data'
 INDEX_DIR = DATA_DIR / 'index'
-FAISS_DIR = INDEX_DIR / 'faiss'
 REFERENCES_PATH = DATA_DIR / 'references.json.gz'
 LABELS_PATH = INDEX_DIR / 'labels.npy'
 META_PATH = INDEX_DIR / 'meta.json'
+GLOBAL_INDEX_PATH = INDEX_DIR / 'global.faiss'
 
 VECTOR_DIM = 14
-IVF_NLIST_DIVISOR = 400
-IVF_NLIST_MAX = 1024
-IVF_NPROBE = 2
-
-
-def _ivf_nlist(n_vectors: int) -> int:
-    return max(1, min(IVF_NLIST_MAX, n_vectors // IVF_NLIST_DIVISOR))
-
-
-def _build_partition_index(part_vectors: np.ndarray, path: Path) -> None:
-    n = len(part_vectors)
-    nlist = _ivf_nlist(n)
-    if n < max(40, 8 * nlist):
-        idx = faiss.IndexFlatL2(VECTOR_DIM)
-        idx.add(part_vectors)
-    else:
-        quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-        # fp16 storage: ~halves on-disk index size and memory working set without measurable
-        # accuracy or latency hit — Faiss decompresses to float32 for SIMD distance compute.
-        idx = faiss.IndexIVFScalarQuantizer(
-            quantizer,
-            VECTOR_DIM,
-            nlist,
-            faiss.ScalarQuantizer.QT_fp16,
-            faiss.METRIC_L2,
-        )
-        idx.train(part_vectors)
-        idx.add(part_vectors)
-        idx.nprobe = IVF_NPROBE
-    faiss.write_index(idx, str(path))
+GLOBAL_NLIST = 2048  # coarse clusters across the full 3M-vector index
+GLOBAL_NPROBE = 12  # lists scanned per query — peak of nprobe sweep at sim 0.17 CPU
 
 
 def _is_fresh() -> bool:
-    if not (LABELS_PATH.exists() and META_PATH.exists() and FAISS_DIR.exists()):
+    if not (LABELS_PATH.exists() and META_PATH.exists() and GLOBAL_INDEX_PATH.exists()):
         return False
     src_mtime = REFERENCES_PATH.stat().st_mtime
-    paths = [LABELS_PATH, META_PATH, *FAISS_DIR.glob('*.faiss')]
-    return all(p.stat().st_mtime >= src_mtime for p in paths)
+    return all(p.stat().st_mtime >= src_mtime for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
 
 
-def main() -> int:  # noqa: PLR0915 - linear pipeline, splitting would obscure the flow
+def main() -> int:
     if _is_fresh():
         logger.info('index is fresh, skipping rebuild')
         return 0
 
-    if FAISS_DIR.exists():
-        shutil.rmtree(FAISS_DIR)
-    FAISS_DIR.mkdir(parents=True)
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
     logger.info('loading references from {}', REFERENCES_PATH)
     vectors_f32, labels = load_references(REFERENCES_PATH)
@@ -123,22 +95,20 @@ def main() -> int:  # noqa: PLR0915 - linear pipeline, splitting would obscure t
     n_homogeneous = int((homogeneous_score >= 0).sum())
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
-    logger.info('building Faiss indices…')
-    # Per-partition axis-aligned bbox (min/max in each dim) for cross-partition
-    # lower-bound pruning at query time. Empty partitions get inert bbox.
-    bbox_min = np.full((N_PARTITIONS, VECTOR_DIM), np.inf, dtype=np.float32)
-    bbox_max = np.full((N_PARTITIONS, VECTOR_DIM), -np.inf, dtype=np.float32)
-    for k in range(N_PARTITIONS):
-        start, end = int(boundaries[k]), int(boundaries[k + 1])
-        if start == end:
-            continue
-        block = vectors_sorted[start:end]
-        bbox_min[k] = block.min(axis=0)
-        bbox_max[k] = block.max(axis=0)
-        if homogeneous_score[k] >= 0:
-            continue
-        part_vectors = np.ascontiguousarray(block, dtype=np.float32)
-        _build_partition_index(part_vectors, FAISS_DIR / f'{k:03d}.faiss')
+    logger.info('building single global IVF index (nlist={}, fp16)', GLOBAL_NLIST)
+    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
+    global_idx = faiss.IndexIVFScalarQuantizer(
+        quantizer,
+        VECTOR_DIM,
+        GLOBAL_NLIST,
+        faiss.ScalarQuantizer.QT_fp16,
+        faiss.METRIC_L2,
+    )
+    train_vectors = np.ascontiguousarray(vectors_sorted, dtype=np.float32)
+    global_idx.train(train_vectors)
+    global_idx.add(train_vectors)
+    global_idx.nprobe = GLOBAL_NPROBE
+    faiss.write_index(global_idx, str(GLOBAL_INDEX_PATH))
 
     logger.info('writing {}', LABELS_PATH)
     np.save(LABELS_PATH, labels_sorted)
@@ -149,14 +119,11 @@ def main() -> int:  # noqa: PLR0915 - linear pipeline, splitting would obscure t
         'boundaries': boundaries.tolist(),
         'fallbacks': fallbacks.tolist(),
         'homogeneous_score': homogeneous_score.tolist(),
-        'bbox_min': bbox_min.tolist(),
-        'bbox_max': bbox_max.tolist(),
-        'ivf_nprobe': IVF_NPROBE,
+        'ivf_nprobe': GLOBAL_NPROBE,
     }
     META_PATH.write_bytes(msgspec.json.encode(meta))
 
-    total_bytes = sum(p.stat().st_size for p in (LABELS_PATH, META_PATH))
-    total_bytes += sum(p.stat().st_size for p in FAISS_DIR.glob('*.faiss'))
+    total_bytes = sum(p.stat().st_size for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
     logger.info('index built ({:.1f} MB on disk)', total_bytes / 1e6)
     return 0
 

@@ -42,12 +42,8 @@ class FraudApp:
     def __init__(self) -> None:
         self.data = build_app_data()
         dummy = np.zeros((1, VECTOR_DIM), dtype=np.float32)
-        warmed = 0
-        for idx in self.data.index.faiss_indices:
-            if idx is not None:
-                idx.search(dummy, K_NEIGHBORS)
-                warmed += 1
-        logger.info('rsgi app ready: {} indices warmed (profile={})', warmed, profile.ENABLED)
+        self.data.index.global_index.search(dummy, K_NEIGHBORS)
+        logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
     async def __rsgi__(self, scope, proto) -> None:  # noqa: PLR0915
         if scope.path == '/ready':

@@ -23,17 +23,44 @@ SHIFT_AMOUNT: Final = 3
 SHIFT_MCC: Final = 5
 
 
-def partition_key(vector: np.ndarray) -> int:
-    """Map a 14-dim normalized vector to a partition id in [0, 256)."""
-    is_online = int(vector[DIM_IS_ONLINE])
-    card_present = int(vector[DIM_CARD_PRESENT])
-    unknown_merchant = int(vector[DIM_UNKNOWN_MERCHANT])
-    amount_bucket = int(np.searchsorted(AMOUNT_CUTS, vector[DIM_AMOUNT], side='right'))
-    mcc_bucket = int(np.searchsorted(MCC_CUTS, vector[DIM_MCC_RISK], side='right'))
+def partition_key(vector: np.ndarray) -> int:  # noqa: C901
+    """Map a 14-dim normalized vector to a partition id in [0, 256).
+
+    Hot path: inline if/elif buckets (avoids numpy.searchsorted's call overhead on
+    tiny 3- and 7-element arrays, which dominated this function in profiling).
+    Thresholds inline as numeric literals for branch-prediction friendliness; they
+    match the AMOUNT_CUTS / MCC_CUTS arrays used in the batch helper below.
+    """
+    amount = float(vector[DIM_AMOUNT])
+    if amount < 0.005:  # noqa: PLR2004
+        amount_bucket = 0
+    elif amount < 0.020:  # noqa: PLR2004
+        amount_bucket = 1
+    elif amount < 0.100:  # noqa: PLR2004
+        amount_bucket = 2
+    else:
+        amount_bucket = 3
+    mcc = float(vector[DIM_MCC_RISK])
+    if mcc < 0.1:  # noqa: PLR2004
+        mcc_bucket = 0
+    elif mcc < 0.2:  # noqa: PLR2004
+        mcc_bucket = 1
+    elif mcc < 0.3:  # noqa: PLR2004
+        mcc_bucket = 2
+    elif mcc < 0.4:  # noqa: PLR2004
+        mcc_bucket = 3
+    elif mcc < 0.5:  # noqa: PLR2004
+        mcc_bucket = 4
+    elif mcc < 0.6:  # noqa: PLR2004
+        mcc_bucket = 5
+    elif mcc < 0.8:  # noqa: PLR2004
+        mcc_bucket = 6
+    else:
+        mcc_bucket = 7
     return (
-        is_online
-        | (card_present << SHIFT_CARD_PRESENT)
-        | (unknown_merchant << SHIFT_UNKNOWN_MERCHANT)
+        int(vector[DIM_IS_ONLINE])
+        | (int(vector[DIM_CARD_PRESENT]) << SHIFT_CARD_PRESENT)
+        | (int(vector[DIM_UNKNOWN_MERCHANT]) << SHIFT_UNKNOWN_MERCHANT)
         | (amount_bucket << SHIFT_AMOUNT)
         | (mcc_bucket << SHIFT_MCC)
     )
