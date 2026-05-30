@@ -84,6 +84,9 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | `FRAUD_THRESHOLD 0.6 → 0.4` (reclassifica score 0.4 = 2/5 vizinhos fraude → fraude) | **-725 sim** | FP saltou 63→373, FN caiu 17→14. Score 0.4 é majoritariamente real-legit (8% fraude); custo FP×1 (+310) >> ganho FN×3 (+9) |
 | `K_NEIGHBORS 5 → 3` | **-810 sim** | Granularidade pior (scores 0, 0.33, 0.67, 1.0): FP+115, FN+85 simultâneo. Menos vizinhos = boundary mais ruidoso em ambas direções. Latência ganho mínimo (~1ms) |
 | Grid search das 2 regras de fast-path (200 thresholds × 14 dims, piso pureza 99.99%) | 0 (sem alternativa melhor) | Pair atual já near-optimal: joint cov 92.57%/99.99% pureza. Best grid alternative `amount/avg≤0.5` + `amount>3061`: 92.29% (-0.28%). `hour≤5h→fraud` interessante mas pior joint. Lever saturado |
+| K-means fast-path (replace 2 rules) | descartado sem testar | Forçaria `vectorize` (~3-5µs) ANTES da decisão pra 92.6% das queries, vs 0.5µs da 2-rule atual em raw payload. Como segunda camada após 2-rule só atinge 7.4% (boundary hard) onde K-means não bate KNN. Análise neutra/negativa antes de implementar |
+| `IndexHNSWSQ` fp16 M=8 efSearch=16 por partição | **-422 sim** | Index 84→247 MB blowing budget (api-1 97% mem), p99 spikes 51→101ms entre runs. Detection regride -224 (FP+20, FN+12) por M=8 sparso. HNSW + 14-dim + 84 partições é regime errado pra HNSW; IVF vence |
+| PCA 14→8 dims (project pré-search) | **-1216 sim** | Detection colapsa 2043→835, erros saltam 81→490. Features são todas discriminativas (sem redundância); 14→8 joga signal fora. Index cai 84→57 MB e p99 fica igual, mas detection é catastrofica. Confirma que 14-dim é mínimo |
 
 ### Fora do constraint do projeto
 
