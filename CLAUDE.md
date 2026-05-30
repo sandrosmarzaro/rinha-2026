@@ -76,6 +76,11 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | `IndexRefineFlat` sobre IVFSQ8 (int8 wide + float32 rerank, k_factor=4) | **-6000 sim** | refine vectors carregam em heap (não mmap), 178MB+ por worker estoura budget → OOM → 51k timeouts |
 | Custom rerank em Python sobre `vectors.npy` mmap'd (IVFSQ8 wide + numpy rerank, k_factor=2/4) | -10 sim, +37MB | funciona (sem -6000 do RefineFlat porque mmap), detection +10 (rerank exato recupera int8). Mas p99 +5ms e index 84→221MB. Net negativo vs fp16. **Concept-proven mas pior que baseline.** |
 | Per-cluster bbox via Faiss `invlists`/`search_preassigned` | descartado sem implementar | requer compute por query de bbox lb pra ≤1024 clusters em Python (~5µs/query). Mesmo padrão dos experimentos always-bbox/smart-exit/neighbor-list que perderam: trabalho Python per-query sob saturação no Haswell ampliar p99 mais do que pruning algorítmico salva. Marginal mesmo se ganhasse algo. |
+| Granian `--backpressure 256 --http1-buffer-size 8192` | 0 sim | Concorrência real ~22 in-flight, backpressure 256 nunca aciona; buffer menor para responses de 50B não pressiona |
+| `MAP_POPULATE` em todos os `.faiss` no startup (single syscall, alternativa limpa ao pre-touch byte-a-byte) | 0 sim | Os 2 min de ramp-up do k6 já aquecem page cache organicamente; pre-fault não muda tail |
+| msgspec `gc=False` em todas as Structs + drop unused `FraudRequest.id` | 0 sim | gc=False é hint sem mudança semântica; struct decode já era ~3µs/req — saving sub-µs invisível |
+| `B+C+D` empilhados | **-41 sim** (regrediu) | Stacking não compõe; run-to-run variance amplifica quando tudo é ruído individual. Não há sinal a tirar |
+| `mlock` no índice via `ctypes.mlock` + `ulimits.memlock:-1` (~80 MB locked, 90/165 MB no cgroup) | 0 sim | Funciona técnicamente, mas sim sem competição por page cache não modela o cenário onde mlock paga. No real Haswell (8 GB RAM, sem outras workloads), também provavelmente neutro — page cache já não evita pages do índice |
 
 ### Fora do constraint do projeto
 
