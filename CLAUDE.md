@@ -98,6 +98,9 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | Granian `--runtime-mode mt --runtime-threads 2` | 0 sim | Profile revelou que gap k6 vs interno (50ms) é **CPU throttle do cgroup**, não serialização do event loop. MT compartilha mesma quota → não move |
 | Granian `--workers 2` por container (4 total) | 0 sim, memória 90% | Mesma quota CPU compartilhada → sem ganho. Memória aperta (150/165 MB) e ainda é risco de OOM |
 | `MAX_EXTRA_PARTITIONS 8 → 4` | -261 sim | Profile mostrou faiss_search interno caiu 30% (1093→768µs p99), MAS k6 p99 IGUAL (51ms). **Comprova: gargalo é CPU throttle externo, não trabalho do handler.** Detection colapsou (FP+23, FN+15) pq cortar bbox cap mata recall |
+| Granian ASGI raw (sem Starlette) | -34 sim | RSGI nativo é mais leve que ASGI mesmo dentro do Granian (não foi só dropar Starlette) — protocolo mais compacto, menos alloc por request |
+| Uvicorn ASGI raw (sem Starlette) | -32 sim | ≈ Granian ASGI raw. Não bate Granian RSGI; Rust core do Granian + protocolo RSGI compactam mais |
+| Hypercorn ASGI raw (sem Starlette) | -192 sim | Server Python-puro lento; p99 80ms vs 51ms do Granian RSGI |
 
 ### Fora do constraint do projeto
 
