@@ -56,6 +56,16 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 9 | **3279** | RSGI nativo (drop Starlette/ASGI) + `PYTHONOPTIMIZE=2` + `--http 1 --no-ws` | **+43** | prévia #7292 no `1bc7158`. p99 65→57 ms (-12%). Detection neutra (FP+1). Diff: -279/+24 LOC, removeu starlette dep. Body da issue precisa ser `rinha/test smarzaro-python` (não só o título — runner parsa o body) |
 | 10 | **3691** | Single global IVF (nlist=2048, nprobe=12) + drop bbox sweep + Python partition_key (cleanup) | **+412** | prévia #7450 no `d4af075`. Detection 2038→2480 (FP 64→32 -50%, FN 18→7 -60%, failure_rate 0.15%→0.07% abaixo do floor). `rate_component=3000` no CAP máximo (error rate < MIN_EPSILON 0.001). **K-means coarse quantizer agrupa por L2 real** vs hand-crafted partition_key arbitrária — não precisa mais do bbox sweep pra compensar desalinhamento. 1 faiss.search/query (vs 1-9 antes). Profile revelou throttle externo do cgroup ser o gargalo k6 — isso libera CPU budget pra recall melhor (faiss_search avg 469→963µs interno mas k6 score subiu). Sim projetou +155, Haswell real entregou +412 (mais CPU = throttle menos severo). Diff -89 LOC (removeu bbox, fallback partition índices, extras_nprobe, MAX_EXTRA_PARTITIONS) |
 
+### Tentativas em cima do single-IVF (todas descartadas)
+
+| Tentativa | Resultado | Por quê |
+|---|---:|---|
+| Per-cluster purity skip (`quantizer.search(q,1)` + cluster_majority lookup; 1825/2048 clusters puros @ 99.9%, 1786 @ 1.0) | -57 sim | 62.5% das boundary cortaram faiss (478→963µs cut), MAS detection regrediu (FP +5, FN +1). Pure cluster ≠ correct K-NN: a true query pode estar mais perto de neighbors em OUTRO cluster que o IVF sweep encontraria. **Lossy fundamental** |
+| nlist tuning (1024, 4096) | 0 sim | (2048, nprobe=12) já saturada. (4096, 24) mesmo total scan: tied. (1024, 6) coarser: tied/pior |
+| `--runtime-mode mt --runtime-threads 2` no single-IVF | -7 sim, p99 +6ms | Threads overhead > paralelismo. GIL + faiss interno C++ não compõem bem |
+| `MAP_POPULATE` no `global.faiss` (single mmap contígua) | 0 sim | Page cache aquece organicamente nos 2min de ramp do k6 |
+| vectorize internals (manual ISO parse) | descartado análise | <1µs/req avg (5-8µs × 10% boundary), throttle absorveria |
+
 ### Descartados (cada um testado, com motivo)
 
 | Tentativa | Resultado | Onde quebrou |
