@@ -95,6 +95,9 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | `MAP_HUGETLB` explícito (2MB pages) | inviável | Host (e provavelmente runner) sem `nr_hugepages` reservados; pedido falha com ENOMEM. THP via `madvise(MADV_HUGEPAGE)` já aplicado |
 | `faiss.omp_set_num_threads(1)` no init | 0 sim | Mesmo efeito de `OMP_NUM_THREADS=1`: faiss/numpy não multithreading em 14-dim |
 | `partition_key` direto do payload raw (pulando vectorize na boundary) | descartado análise | Homogeneous partitions são extremos (todos labels iguais); boundary queries são por definição ambíguas → raramente caem em homogeneous. Adiciona ~2µs em 79% do boundary, economiza ~3µs em 21% → net negativo |
+| Granian `--runtime-mode mt --runtime-threads 2` | 0 sim | Profile revelou que gap k6 vs interno (50ms) é **CPU throttle do cgroup**, não serialização do event loop. MT compartilha mesma quota → não move |
+| Granian `--workers 2` por container (4 total) | 0 sim, memória 90% | Mesma quota CPU compartilhada → sem ganho. Memória aperta (150/165 MB) e ainda é risco de OOM |
+| `MAX_EXTRA_PARTITIONS 8 → 4` | -261 sim | Profile mostrou faiss_search interno caiu 30% (1093→768µs p99), MAS k6 p99 IGUAL (51ms). **Comprova: gargalo é CPU throttle externo, não trabalho do handler.** Detection colapsou (FP+23, FN+15) pq cortar bbox cap mata recall |
 
 ### Fora do constraint do projeto
 
@@ -184,6 +187,13 @@ no Haswell, fora do nosso teto.
   e direção. Variância vista ~10-15% entre runs com mesma imagem.
 - **`ruff format` quebra `except (A, B):`** virando sintaxe inválida → usar
   `contextlib.suppress(...)`.
+- **Gargalo real é CPU throttle do cgroup, não o handler.** Profile interno
+  (`fraud_api/profile.py`, opt-in via `RINHA_PROFILE=1`) mediu p99 dentro do worker
+  = 1.5ms vs k6 p99 = 52ms. Os 50ms gap são *external*: o cgroup CFS allowa só
+  `quota` por janela de 100ms e bursts excedendo a quota esperam o refresh.
+  Implicação: otimizar microsegundos do handler não move o score; tem que reduzir
+  CPU/request a ponto de caber em uma janela. Comprovado via `MAX_EXTRA_PARTITIONS=4`
+  que cortou faiss_search 30% interno mas k6 p99 inalterado.
 - **`umask 000`** no entrypoint: HAProxy roda non-root e precisa escrever no UDS compartilhado.
 
 ## Dev
