@@ -81,6 +81,9 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | msgspec `gc=False` em todas as Structs + drop unused `FraudRequest.id` | 0 sim | gc=False é hint sem mudança semântica; struct decode já era ~3µs/req — saving sub-µs invisível |
 | `B+C+D` empilhados | **-41 sim** (regrediu) | Stacking não compõe; run-to-run variance amplifica quando tudo é ruído individual. Não há sinal a tirar |
 | `mlock` no índice via `ctypes.mlock` + `ulimits.memlock:-1` (~80 MB locked, 90/165 MB no cgroup) | 0 sim | Funciona técnicamente, mas sim sem competição por page cache não modela o cenário onde mlock paga. No real Haswell (8 GB RAM, sem outras workloads), também provavelmente neutro — page cache já não evita pages do índice |
+| `FRAUD_THRESHOLD 0.6 → 0.4` (reclassifica score 0.4 = 2/5 vizinhos fraude → fraude) | **-725 sim** | FP saltou 63→373, FN caiu 17→14. Score 0.4 é majoritariamente real-legit (8% fraude); custo FP×1 (+310) >> ganho FN×3 (+9) |
+| `K_NEIGHBORS 5 → 3` | **-810 sim** | Granularidade pior (scores 0, 0.33, 0.67, 1.0): FP+115, FN+85 simultâneo. Menos vizinhos = boundary mais ruidoso em ambas direções. Latência ganho mínimo (~1ms) |
+| Grid search das 2 regras de fast-path (200 thresholds × 14 dims, piso pureza 99.99%) | 0 (sem alternativa melhor) | Pair atual já near-optimal: joint cov 92.57%/99.99% pureza. Best grid alternative `amount/avg≤0.5` + `amount>3061`: 92.29% (-0.28%). `hour≤5h→fraud` interessante mas pior joint. Lever saturado |
 
 ### Fora do constraint do projeto
 
