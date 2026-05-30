@@ -91,6 +91,10 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | `LD_PRELOAD=libmimalloc.so.3` | -9 sim (ruido) | Alloc patterns em Python são dominados por interior structures (objects, dicts); allocator swap não move |
 | `madvise(MADV_RANDOM)` em faiss mmap | inviável | Faiss owns o mmap e não expõe pointer pra advise externo; precisaria patch no Faiss |
 | Recompilar faiss-cpu com `-march=haswell` | desnecessário | Wheel oficial `faiss-cpu 1.14.2` já contém `OPTIMIZE DD AVX2` (Dispatcher Dinâmico), runtime já usa AVX2 path em Haswell |
+| HAProxy `maxconn 64` por backend | 0 sim | Concorrência real ~22 in-flight, threshold 64 nunca aciona, sem 503s, sem efeito no tail |
+| `MAP_HUGETLB` explícito (2MB pages) | inviável | Host (e provavelmente runner) sem `nr_hugepages` reservados; pedido falha com ENOMEM. THP via `madvise(MADV_HUGEPAGE)` já aplicado |
+| `faiss.omp_set_num_threads(1)` no init | 0 sim | Mesmo efeito de `OMP_NUM_THREADS=1`: faiss/numpy não multithreading em 14-dim |
+| `partition_key` direto do payload raw (pulando vectorize na boundary) | descartado análise | Homogeneous partitions são extremos (todos labels iguais); boundary queries são por definição ambíguas → raramente caem em homogeneous. Adiciona ~2µs em 79% do boundary, economiza ~3µs em 21% → net negativo |
 
 ### Fora do constraint do projeto
 
