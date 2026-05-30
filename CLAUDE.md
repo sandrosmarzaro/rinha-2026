@@ -87,6 +87,10 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | K-means fast-path (replace 2 rules) | descartado sem testar | Forçaria `vectorize` (~3-5µs) ANTES da decisão pra 92.6% das queries, vs 0.5µs da 2-rule atual em raw payload. Como segunda camada após 2-rule só atinge 7.4% (boundary hard) onde K-means não bate KNN. Análise neutra/negativa antes de implementar |
 | `IndexHNSWSQ` fp16 M=8 efSearch=16 por partição | **-422 sim** | Index 84→247 MB blowing budget (api-1 97% mem), p99 spikes 51→101ms entre runs. Detection regride -224 (FP+20, FN+12) por M=8 sparso. HNSW + 14-dim + 84 partições é regime errado pra HNSW; IVF vence |
 | PCA 14→8 dims (project pré-search) | **-1216 sim** | Detection colapsa 2043→835, erros saltam 81→490. Features são todas discriminativas (sem redundância); 14→8 joga signal fora. Index cai 84→57 MB e p99 fica igual, mas detection é catastrofica. Confirma que 14-dim é mínimo |
+| `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 FAISS_NUM_THREADS=1` | 0 sim | faiss/numpy não estavam multithreading em ops de 14-dim de qualquer jeito |
+| `LD_PRELOAD=libmimalloc.so.3` | -9 sim (ruido) | Alloc patterns em Python são dominados por interior structures (objects, dicts); allocator swap não move |
+| `madvise(MADV_RANDOM)` em faiss mmap | inviável | Faiss owns o mmap e não expõe pointer pra advise externo; precisaria patch no Faiss |
+| Recompilar faiss-cpu com `-march=haswell` | desnecessário | Wheel oficial `faiss-cpu 1.14.2` já contém `OPTIMIZE DD AVX2` (Dispatcher Dinâmico), runtime já usa AVX2 path em Haswell |
 
 ### Fora do constraint do projeto
 
