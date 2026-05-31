@@ -19,12 +19,10 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): banda ~3190-3236.** Quatro prévias na trajetória final
-(fast-path validado em #7218 3233 e #7241 3233, variância em #7232 3190, fp16 storage em
-#7242 3236). Jitter ~1.5% só de p99 (63-72ms); detecção cravada em 2038-2048. Failure ~0.15%.
-**O algoritmo é determinístico**: TP/TN/FP/FN em ~23900-23925/30030-30055/62-64/18. Variância
-maior (vimos -400 no #7213 com 26 http_errors) é caso atípico de cauda do runner, não a banda
-normal. Gargalo: latência (p99_score 1190/3000) — detecção já no patamar prático.
+**Score real (hardware da Rinha): 3722 confirmado em prévia #7619.** Plateau #11 com
+k-means training mais firme (niter=25 nredo=4). Detection 2490 (FP=34, FN=5, ERR=0,
+E=49); p99 58.5ms; failure 0.07%. `rate_component=3000` ainda no cap máximo. Gargalo
+permanece p99 (1232/3000) — detecção próxima do teto prático.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo `zanfranceschi/
 rinha-de-backend-2026`. Ilimitada por design da Rinha. **Não rodar sim local** — quota de
@@ -55,6 +53,7 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 8 | **3236** | `IndexIVFScalarQuantizer` fp16 storage | 0, mem -43% | prévia #7242. Mesma banda (3190-3233) mas index 147→84 MB, working set menor — folga pro tail sob pressão. Faiss decomprime pra float32 pra SIMD distance |
 | 9 | **3279** | RSGI nativo (drop Starlette/ASGI) + `PYTHONOPTIMIZE=2` + `--http 1 --no-ws` | **+43** | prévia #7292 no `1bc7158`. p99 65→57 ms (-12%). Detection neutra (FP+1). Diff: -279/+24 LOC, removeu starlette dep. Body da issue precisa ser `rinha/test smarzaro-python` (não só o título — runner parsa o body) |
 | 10 | **3691** | Single global IVF (nlist=2048, nprobe=12) + drop bbox sweep + Python partition_key (cleanup) | **+412** | prévia #7450 no `d4af075`. Detection 2038→2480 (FP 64→32 -50%, FN 18→7 -60%, failure_rate 0.15%→0.07% abaixo do floor). `rate_component=3000` no CAP máximo (error rate < MIN_EPSILON 0.001). **K-means coarse quantizer agrupa por L2 real** vs hand-crafted partition_key arbitrária — não precisa mais do bbox sweep pra compensar desalinhamento. 1 faiss.search/query (vs 1-9 antes). Profile revelou throttle externo do cgroup ser o gargalo k6 — isso libera CPU budget pra recall melhor (faiss_search avg 469→963µs interno mas k6 score subiu). Sim projetou +155, Haswell real entregou +412 (mais CPU = throttle menos severo). Diff -89 LOC (removeu bbox, fallback partition índices, extras_nprobe, MAX_EXTRA_PARTITIONS) |
+| 11 | **3722** | K-means training `cp.niter=25 cp.nredo=4` (vs default 10/1) | **+31** | prévia #7619 no `2b0559e`. Detection 2480→2490 (FN 7→5 -29%, FP 32→34 +6%, net E 53→49 -7.5%). p99 63.7→58.5 ms (-8%). Sim avg 3707→3705 (dentro de ruído de 12 pts) mas detection determinística — 3 réplicas idênticas FP=34 FN=5. Real Haswell carregou a melhoria de detecção exatamente como previsto + ganho de p99 não modelado pelo sim. Custo: +8s no build, runtime 0 |
 
 ### Tentativas em cima do single-IVF (todas descartadas)
 
@@ -64,7 +63,12 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | nlist tuning (1024, 4096) | 0 sim | (2048, nprobe=12) já saturada. (4096, 24) mesmo total scan: tied. (1024, 6) coarser: tied/pior |
 | `--runtime-mode mt --runtime-threads 2` no single-IVF | -7 sim, p99 +6ms | Threads overhead > paralelismo. GIL + faiss interno C++ não compõem bem |
 | `MAP_POPULATE` no `global.faiss` (single mmap contígua) | 0 sim | Page cache aquece organicamente nos 2min de ramp do k6 |
-| vectorize internals (manual ISO parse) | descartado análise | <1µs/req avg (5-8µs × 10% boundary), throttle absorveria |
+| vectorize internals (manual ISO parse) | -217 ns/req | microbench Py 3.14: `fromisoformat` 416ns < slice manual 633ns. Datetime tem C-impl otimizado, manual python perde. Mesmo se ganhasse, seria 0.05µs avg agregado em 10% boundary |
+| Pre-allocated `np.empty(14)` buffer (singleton st-mode) | 0 sim (3709 vs banda 3701-3713) | Alloc custa ~272ns/call mas em 10% boundary = 0.03µs avg agregado, dentro de ruído estatístico |
+| nprobe sweep fino (8/10/14 vs 12) com 2 réplicas cada | 0 sim | nprobe=10 +13 avg (banda 30 pts run-to-run), nprobe=14 melhor detection (FN=5) mas p99 +7ms cancela. Pico ainda em 10-12 |
+| CPU pinning (`cpuset: '0'`/`'1'` por container) | 0 sim | Sim host tem cores sobrando (sem contenção L1/L2 pra reduzir); real Rinha é single-core onde cpuset é no-op anyway |
+| `IndexIVFFlat` fp32 wide (revert plateau 8) | 0 sim, +100MB | Mesma detection que fp16 (não-lossy a 14 dims) mas index 84→184MB. Sem ganho de p99, custo de mem. Mantém fp16 |
+| Cluster homogeneous skip @ 1.0 floor (replicate com niter=25) | descartado por prior data | 1784/2048 clusters pure @ 1.0 com niter=25 (vs 1786 com niter=10) — k-means mais firme não muda estrutura de purity. Ceiling estrutural: boundary query pode ter true K-NN em cluster vizinho mesmo com cluster próprio puro |
 
 ### Descartados (cada um testado, com motivo)
 
