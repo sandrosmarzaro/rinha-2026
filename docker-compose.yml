@@ -1,5 +1,5 @@
 x-api: &api
-  image: sandrosmarzaro/rinha-2026:2b0559e
+  image: sandrosmarzaro/rinha-2026:3bc922a
   networks: [rinha-net]
   volumes:
     - sockets:/tmp/sockets
@@ -11,7 +11,7 @@ x-api: &api
   deploy:
     resources:
       limits:
-        cpus: '0.45'
+        cpus: '0.40'
         memory: 165M
 
 services:
@@ -44,7 +44,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.10'
+          cpus: '0.20'
           memory: 20M
 
 networks:
