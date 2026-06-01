@@ -19,10 +19,11 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): 3722 confirmado em prévia #7619.** Plateau #11 com
-k-means training mais firme (niter=25 nredo=4). Detection 2490 (FP=34, FN=5, ERR=0,
-E=49); p99 58.5ms; failure 0.07%. `rate_component=3000` ainda no cap máximo. Gargalo
-permanece p99 (1232/3000) — detecção próxima do teto prático.
+**Score real (hardware da Rinha): 4091 confirmado em prévia #7825.** Plateau #12 com
+IVFFlat fp32 + HAProxy bump 0.10→0.20 (APIs 0.45→0.40 cada). Detection 2501 (FP=33,
+FN=4, ERR=0, E=45); p99 25.7ms (−56% do plateau 11); failure 0.07%. `rate_component=3000`
+ainda no cap. Salto de +368 = p99 cortado pela metade libera muito p99_score
+(1232→1590) + detection +11.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo `zanfranceschi/
 rinha-de-backend-2026`. Ilimitada por design da Rinha. **Não rodar sim local** — quota de
@@ -54,6 +55,7 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | 9 | **3279** | RSGI nativo (drop Starlette/ASGI) + `PYTHONOPTIMIZE=2` + `--http 1 --no-ws` | **+43** | prévia #7292 no `1bc7158`. p99 65→57 ms (-12%). Detection neutra (FP+1). Diff: -279/+24 LOC, removeu starlette dep. Body da issue precisa ser `rinha/test smarzaro-python` (não só o título — runner parsa o body) |
 | 10 | **3691** | Single global IVF (nlist=2048, nprobe=12) + drop bbox sweep + Python partition_key (cleanup) | **+412** | prévia #7450 no `d4af075`. Detection 2038→2480 (FP 64→32 -50%, FN 18→7 -60%, failure_rate 0.15%→0.07% abaixo do floor). `rate_component=3000` no CAP máximo (error rate < MIN_EPSILON 0.001). **K-means coarse quantizer agrupa por L2 real** vs hand-crafted partition_key arbitrária — não precisa mais do bbox sweep pra compensar desalinhamento. 1 faiss.search/query (vs 1-9 antes). Profile revelou throttle externo do cgroup ser o gargalo k6 — isso libera CPU budget pra recall melhor (faiss_search avg 469→963µs interno mas k6 score subiu). Sim projetou +155, Haswell real entregou +412 (mais CPU = throttle menos severo). Diff -89 LOC (removeu bbox, fallback partition índices, extras_nprobe, MAX_EXTRA_PARTITIONS) |
 | 11 | **3722** | K-means training `cp.niter=25 cp.nredo=4` (vs default 10/1) | **+31** | prévia #7619 no `2b0559e`. Detection 2480→2490 (FN 7→5 -29%, FP 32→34 +6%, net E 53→49 -7.5%). p99 63.7→58.5 ms (-8%). Sim avg 3707→3705 (dentro de ruído de 12 pts) mas detection determinística — 3 réplicas idênticas FP=34 FN=5. Real Haswell carregou a melhoria de detecção exatamente como previsto + ganho de p99 não modelado pelo sim. Custo: +8s no build, runtime 0 |
+| 12 | **4091** | IVFFlat fp32 (drop SQ_fp16) + HAProxy CPU 0.10→0.20 (APIs 0.45→0.40 cada) | **+368** | prévia #7825 no `3bc922a`. Diagnose com `taskset -c 0` revelou que IndexIVFScalarQuantizer fp16 leva 798µs/query vs IVFFlat fp32 102µs (7.8×) — em 14-dim a decompressão fp16 domina. HAProxy a 0.10 estava CPU-starved → 1-5 ERR por sim run; a 0.20 ERR=0 sistemático. p99 58.5→25.7 ms (−56%); detection 2490→2501 (FP 34→33, FN 5→4). Index 84→184MB; runtime resident set 87/165MB no sim (mmap evict de cold pages mantém working set baixo). 5 sim replicates 3766-3802 (band 36 pts, ERR=0 todas), detection idêntica FP=33 FN=4 E=45 — sim previu real com precisão excepcional. Real Haswell entregou p99 ainda melhor que sim modelou (25.7ms vs sim 53ms) por ter mais CPU absoluto |
 
 ### Tentativas em cima do single-IVF (todas descartadas)
 
