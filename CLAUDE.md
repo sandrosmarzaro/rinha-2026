@@ -116,6 +116,9 @@ calibrado e/ou prévia oficial); cada uma é um commit no repo.
 | Granian ASGI raw (sem Starlette) | -34 sim | RSGI nativo é mais leve que ASGI mesmo dentro do Granian (não foi só dropar Starlette) — protocolo mais compacto, menos alloc por request |
 | Uvicorn ASGI raw (sem Starlette) | -32 sim | ≈ Granian ASGI raw. Não bate Granian RSGI; Rust core do Granian + protocolo RSGI compactam mais |
 | Hypercorn ASGI raw (sem Starlette) | -192 sim | Server Python-puro lento; p99 80ms vs 51ms do Granian RSGI |
+| Decision tree pre-classifier (depth=10, min_leaf=50, sample=500k, conf=0.95) APÓS as 2 regras | -100 a -150 sim | Tree treina em references e cobre 53% do boundary com 99.6% accuracy em test-data, mas sob k6 saturado FP saltou 34→43-49 e ERR variou 1-5 (vs baseline 0-3). Detection 2382→2257 avg. Faiss KNN sobre 5 vizinhos é estritamente melhor que tree no boundary porque o que sobrou após 2-rule é exatamente a fatia ambígua onde recall importa |
+| Adaptive nprobe (LOW=6 primário, HIGH=16 quando fc∈{2,3}) | 0 sim, faiss avg +18% | Profile revelou que ~51% das queries boundary triggam HIGH pass — boundary é intrinsecamente ambíguo após 2-rule já cortar o fácil. avg faiss subiu 1082→1272µs em vez de cair. Variantes (LOW=4/8, HIGH=12, ambig={1,2,3,4}) todas pioraram. Lever errado pro nosso shape de boundary |
+| Cell-mean fast-path sobre IVF cluster (margem 0.01) | -120 sim | Mesmo problema do tree: o 7.4% que sobra após 2-rule é o conjunto onde majority-vote do cluster diverge do KNN-exato. FN +5 estrutural (frauds que vivem em clusters predominantemente legit), FP +4. Detection 2382→2216 avg |
 
 ### Fora do constraint do projeto
 
