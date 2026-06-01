@@ -95,15 +95,12 @@ def main() -> int:
     n_homogeneous = int((homogeneous_score >= 0).sum())
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
-    logger.info('building single global IVF index (nlist={}, fp16, niter=25 nredo=4)', GLOBAL_NLIST)
-    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-    global_idx = faiss.IndexIVFScalarQuantizer(
-        quantizer,
-        VECTOR_DIM,
+    logger.info(
+        'building single global IVFFlat fp32 index (nlist={}, niter=25 nredo=4)',
         GLOBAL_NLIST,
-        faiss.ScalarQuantizer.QT_fp16,
-        faiss.METRIC_L2,
     )
+    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
+    global_idx = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
     global_idx.cp.niter = 25
     global_idx.cp.nredo = 4
     train_vectors = np.ascontiguousarray(vectors_sorted, dtype=np.float32)
