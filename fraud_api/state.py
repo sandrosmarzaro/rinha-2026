@@ -53,23 +53,16 @@ def _build_synthetic_index() -> PartitionedIndex:
         elif fraud_count == (end - start):
             homogeneous_score[k] = 1.0
 
-    # Single dummy cluster centered at the mean — synthetic path is for parity tests only.
-    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-    quantizer.add(
-        np.ascontiguousarray(sorted_vectors.mean(axis=0, keepdims=True), dtype=np.float32)
-    )
-    cluster_offsets = np.array([0, SYNTHETIC_N], dtype=np.int64)
+    global_index = faiss.IndexFlatL2(VECTOR_DIM)
+    global_index.add(np.ascontiguousarray(sorted_vectors, dtype=np.float32))
 
     return PartitionedIndex(
         labels=sorted_labels,
         boundaries=boundaries,
         fallbacks=compute_fallbacks(boundaries),
         homogeneous_score=homogeneous_score,
-        quantizer=quantizer,
-        vectors=np.ascontiguousarray(sorted_vectors, dtype=np.float32),
-        cluster_labels=sorted_labels,
-        cluster_offsets=cluster_offsets,
-        ivf_nprobe=1,
+        global_index=global_index,
+        ivf_nprobe=SYNTHETIC_NPROBE,
     )
 
 
