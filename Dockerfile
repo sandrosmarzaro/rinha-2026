@@ -16,7 +16,11 @@ COPY fraud_api/ /app/fraud_api/
 COPY scripts/ /app/scripts/
 COPY data/references.json.gz data/mcc_risk.json data/normalization.json /app/data/
 
-RUN uv run python scripts/build_index.py
+ARG RINHA_SUBSAMPLE_FRAC=1.0
+ARG RINHA_DEDUP_EPS=0.0
+RUN RINHA_SUBSAMPLE_FRAC=${RINHA_SUBSAMPLE_FRAC} \
+    RINHA_DEDUP_EPS=${RINHA_DEDUP_EPS} \
+    uv run python scripts/build_index.py
 
 
 FROM python:3.14-slim AS production
