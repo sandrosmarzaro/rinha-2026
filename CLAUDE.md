@@ -8,10 +8,12 @@ atual, e gotchas vivos**.
 
 ## Arquitetura
 
-HAProxy (UDS, round-robin) → 2× Granian/RSGI → Faiss `IndexIVFFlat` fp32 single global
-(nlist=2048, nprobe=12), mmap-compartilhado. Payload → 2-rule raw fast-path (92.6%) OR
-vectorize 14-dim → partition_key 8-bit (homogeneous-exit) → faiss KNN k=5 → resposta
-pré-renderizada (só 6 scores possíveis).
+HAProxy (UDS, round-robin) → 2× Granian/RSGI → **pure numpy IVF** (nlist=2048, nprobe=12),
+mmap-compartilhado. Faiss roda só no build pra treinar k-means; runtime carrega
+`centroids.npy` + `vectors.npy` cluster-sorted + `vec_norms.npy` pré-computadas e calcula
+distâncias via norm-expansion (`||a-b||² = ||a||² + ||b||² - 2·a·b`). Payload → 2-rule raw
+fast-path (92.6%) OR vectorize 14-dim → partition_key 8-bit (homogeneous-exit) → numpy IVF
+KNN k=5 → resposta pré-renderizada (só 6 scores possíveis).
 
 ## Limites e scoring (decidem tudo)
 
@@ -24,17 +26,19 @@ pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): 4091 confirmado em prévia #7825.** Plateau #12 com
-IVFFlat fp32 + HAProxy bump 0.10→0.20 (APIs 0.45→0.40 cada). Detection 2501 (FP=33,
-FN=4, ERR=0, E=45); p99 25.7ms; failure 0.07%. `rate_component=3000` ainda no cap.
-Gargalo restante = p99 score (1590/3000) — detection já saturada perto do teto.
+**Score real (hardware da Rinha): 4177 confirmado em prévia #7906.** Plateau #13 com
+pure numpy IVF (drop Faiss do runtime, ele só treina k-means no build). Detection 2501
+(FP=33, FN=4, ERR=0, E=45 — idêntica ao plateau #12 já que mesmas centroides + mesmo
+nprobe = mesmo recall); p99 21.1ms; p99 score 1676. Gargalo restante = ainda p99 score
+(1676/3000) — detection já saturada perto do teto.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo
 `zanfranceschi/rinha-de-backend-2026`. Sim local em `docker-compose.sim.yml` calibrado
 0.16/0.16/0.08 (≈ real 0.40/0.40/0.20 com fator throttle 2.5×). **Sim prediz bem
-mudanças de parâmetros dentro do mesmo motor; falha quando muda o substrato algorítmico
-(provado em plateau #5 lever: numpy IVF +34 sim, −74 real).** Validar mudanças de
-substrato com bench bare-metal `taskset -c 0` antes de queimar prévia.
+mudanças de parâmetros dentro do mesmo motor; engine MIXING (Faiss+numpy) diverge real
+mas single-engine numpy reproduz sim direção (Lever 5 mixto regrediu real, plateau #13
+single-engine ganhou).** Validar mudanças de substrato com bench bare-metal
+`taskset -c 0` antes de queimar prévia.
 
 ## Findings vivos (regras de engajamento)
 
