@@ -5,6 +5,7 @@ without the ASGI message-loop layer. Saves a function-call layer + ASGI dict all
 per request.
 """
 
+import gc
 from typing import Final
 
 import msgspec
@@ -41,8 +42,11 @@ class FraudApp:
 
     def __init__(self) -> None:
         self.data = build_app_data()
+        # Hot path creates only short-lived numpy arrays + msgspec Structs — no reference
+        # cycles. Disable the cycle collector so it never pauses the worker; refcount
+        # alone is enough to free everything.
+        gc.disable()
         dummy = np.zeros(VECTOR_DIM, dtype=np.float32)
-        # Warm caches: pre-touch the centroid arrays and the vectors mmap.
         partitioned_score(dummy, 0, self.data.index)
         logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
