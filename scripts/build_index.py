@@ -3,16 +3,16 @@
 Output:
     data/index/
       labels.npy            uint8 (N,) global label array (sorted by partition key)
-      meta.json             {boundaries, fallbacks, homogeneous_score, ivf_nprobe}
-      global.faiss          single IndexIVFScalarQuantizer (fp16) over all N vectors
+      labels_cluster.npy    uint8 (N,) labels aligned to vectors.npy (cluster-sorted)
+      vectors.npy           fp32 (N, 14) all reference vectors sorted by IVF cluster
+      vec_norms.npy         fp32 (N,) precomputed ||vec||² per vector
+      centroids.npy         fp32 (nlist, 14) k-means centroids
+      centroid_norms.npy    fp32 (nlist,) precomputed ||centroid||²
+      cluster_offsets.npy   int64 (nlist+1,) cluster start offsets in vectors.npy
+      meta.json             {boundaries, fallbacks, homogeneous_score, ivf_nprobe, ivf_nlist}
 
-The faiss index is reloaded at runtime via `faiss.read_index(path, IO_FLAG_MMAP)`
-so two API workers can share the same page cache.
-
-Partition data (boundaries, fallbacks, homogeneous_score) is kept only for the
-fast-path homogeneous-partition early-exit; KNN itself runs on the single global
-index. Single-call faiss.search avoids ~150us of Python crossing overhead vs the
-former per-partition + bbox sweep approach.
+Faiss is used at BUILD time to run k-means (`IndexIVFFlat.train`); at RUNTIME the
+search uses only numpy (centroid scan + cluster scan + norms-expansion distance).
 
 Idempotent: skips rebuild when index files are newer than the source.
 """
@@ -36,21 +36,37 @@ INDEX_DIR = DATA_DIR / 'index'
 REFERENCES_PATH = DATA_DIR / 'references.json.gz'
 LABELS_PATH = INDEX_DIR / 'labels.npy'
 META_PATH = INDEX_DIR / 'meta.json'
-GLOBAL_INDEX_PATH = INDEX_DIR / 'global.faiss'
+VECTORS_PATH = INDEX_DIR / 'vectors.npy'
+VEC_NORMS_PATH = INDEX_DIR / 'vec_norms.npy'
+LABELS_CLUSTER_PATH = INDEX_DIR / 'labels_cluster.npy'
+CENTROIDS_PATH = INDEX_DIR / 'centroids.npy'
+CENTROID_NORMS_PATH = INDEX_DIR / 'centroid_norms.npy'
+CLUSTER_OFFSETS_PATH = INDEX_DIR / 'cluster_offsets.npy'
 
 VECTOR_DIM = 14
-GLOBAL_NLIST = 2048  # coarse clusters across the full 3M-vector index
-GLOBAL_NPROBE = 12  # lists scanned per query — peak of nprobe sweep at sim 0.17 CPU
+GLOBAL_NLIST = 2048
+GLOBAL_NPROBE = 12
+
+ARTIFACTS = (
+    LABELS_PATH,
+    META_PATH,
+    VECTORS_PATH,
+    VEC_NORMS_PATH,
+    LABELS_CLUSTER_PATH,
+    CENTROIDS_PATH,
+    CENTROID_NORMS_PATH,
+    CLUSTER_OFFSETS_PATH,
+)
 
 
 def _is_fresh() -> bool:
-    if not (LABELS_PATH.exists() and META_PATH.exists() and GLOBAL_INDEX_PATH.exists()):
+    if not all(p.exists() for p in ARTIFACTS):
         return False
     src_mtime = REFERENCES_PATH.stat().st_mtime
-    return all(p.stat().st_mtime >= src_mtime for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
+    return all(p.stat().st_mtime >= src_mtime for p in ARTIFACTS)
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915
     if _is_fresh():
         logger.info('index is fresh, skipping rebuild')
         return 0
@@ -95,23 +111,47 @@ def main() -> int:
     n_homogeneous = int((homogeneous_score >= 0).sum())
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
-    logger.info(
-        'building single global IVFFlat fp32 index (nlist={}, niter=25 nredo=4)',
-        GLOBAL_NLIST,
-    )
-    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-    global_idx = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
-    global_idx.cp.niter = 25
-    global_idx.cp.nredo = 4
+    logger.info('training k-means centroids (nlist={}, niter=25 nredo=4)', GLOBAL_NLIST)
     train_vectors = np.ascontiguousarray(vectors_sorted, dtype=np.float32)
-    global_idx.train(train_vectors)
-    global_idx.add(train_vectors)
-    global_idx.nprobe = GLOBAL_NPROBE
-    faiss.write_index(global_idx, str(GLOBAL_INDEX_PATH))
+    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
+    ivf = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
+    ivf.cp.niter = 25
+    ivf.cp.nredo = 4
+    ivf.train(train_vectors)
 
-    logger.info('writing {}', LABELS_PATH)
+    logger.info('extracting centroids + assigning vectors to clusters')
+    centroids = np.empty((GLOBAL_NLIST, VECTOR_DIM), dtype=np.float32)
+    for c in range(GLOBAL_NLIST):
+        centroids[c] = ivf.quantizer.reconstruct(c)
+    _d, assigns = ivf.quantizer.search(train_vectors, 1)
+    assigns = assigns[:, 0]
+
+    cluster_counts = np.bincount(assigns, minlength=GLOBAL_NLIST).astype(np.int64)
+    cluster_offsets = np.empty(GLOBAL_NLIST + 1, dtype=np.int64)
+    cluster_offsets[0] = 0
+    np.cumsum(cluster_counts, out=cluster_offsets[1:])
+    cluster_order = np.argsort(assigns, kind='stable')
+    vectors_cluster = np.ascontiguousarray(train_vectors[cluster_order], dtype=np.float32)
+    labels_cluster = labels_sorted[cluster_order]
+    vec_norms = np.einsum('ij,ij->i', vectors_cluster, vectors_cluster).astype(np.float32)
+    centroid_norms = np.einsum('ij,ij->i', centroids, centroids).astype(np.float32)
+    logger.info(
+        'cluster layout: min={} p50={} p99={} max={}',
+        int(cluster_counts.min()),
+        int(np.percentile(cluster_counts, 50)),
+        int(np.percentile(cluster_counts, 99)),
+        int(cluster_counts.max()),
+    )
+
+    logger.info('writing numpy artifacts')
     np.save(LABELS_PATH, labels_sorted)
-    logger.info('writing {}', META_PATH)
+    np.save(VECTORS_PATH, vectors_cluster)
+    np.save(VEC_NORMS_PATH, vec_norms)
+    np.save(LABELS_CLUSTER_PATH, labels_cluster)
+    np.save(CENTROIDS_PATH, centroids)
+    np.save(CENTROID_NORMS_PATH, centroid_norms)
+    np.save(CLUSTER_OFFSETS_PATH, cluster_offsets)
+
     meta = {
         'n_partitions': N_PARTITIONS,
         'total_vectors': len(vectors_sorted),
@@ -119,10 +159,11 @@ def main() -> int:
         'fallbacks': fallbacks.tolist(),
         'homogeneous_score': homogeneous_score.tolist(),
         'ivf_nprobe': GLOBAL_NPROBE,
+        'ivf_nlist': GLOBAL_NLIST,
     }
     META_PATH.write_bytes(msgspec.json.encode(meta))
 
-    total_bytes = sum(p.stat().st_size for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
+    total_bytes = sum(p.stat().st_size for p in ARTIFACTS)
     logger.info('index built ({:.1f} MB on disk)', total_bytes / 1e6)
     return 0
 

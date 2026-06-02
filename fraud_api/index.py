@@ -4,7 +4,6 @@ import mmap
 from dataclasses import dataclass
 from pathlib import Path
 
-import faiss
 import msgspec
 import numpy as np
 
@@ -14,7 +13,12 @@ FRAUD_LABEL = 'fraud'
 
 LABELS_FILENAME = 'labels.npy'
 META_FILENAME = 'meta.json'
-GLOBAL_INDEX_FILENAME = 'global.faiss'
+VECTORS_FILENAME = 'vectors.npy'
+VEC_NORMS_FILENAME = 'vec_norms.npy'
+LABELS_CLUSTER_FILENAME = 'labels_cluster.npy'
+CENTROIDS_FILENAME = 'centroids.npy'
+CENTROID_NORMS_FILENAME = 'centroid_norms.npy'
+CLUSTER_OFFSETS_FILENAME = 'cluster_offsets.npy'
 
 
 def load_references(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
@@ -35,34 +39,49 @@ def load_mcc_risk(path: Path | str) -> dict[str, float]:
 
 @dataclass(slots=True, frozen=True)
 class PartitionedIndex:
-    labels: np.ndarray  # (N,) uint8, mmapped, sorted by partition key (global ids)
-    boundaries: np.ndarray  # (N_PARTITIONS + 1,) uint32, partition start offsets
-    fallbacks: np.ndarray  # (N_PARTITIONS,) uint8, redirect empties to nearest non-empty
-    homogeneous_score: np.ndarray  # (N_PARTITIONS,) float32, ≥0 if all labels match
-    global_index: faiss.Index  # single IVF over all 3M vectors (mmapped)
+    labels: np.ndarray  # (N,) uint8, partition-sorted (used by homogeneous_score)
+    boundaries: np.ndarray  # (N_PARTITIONS + 1,) uint32
+    fallbacks: np.ndarray  # (N_PARTITIONS,) uint8
+    homogeneous_score: np.ndarray  # (N_PARTITIONS,) float32
+    vectors: np.ndarray  # (N, 14) fp32, mmapped, cluster-sorted
+    vec_norms: np.ndarray  # (N,) fp32, mmapped, ||vec||² per row
+    cluster_labels: np.ndarray  # (N,) uint8, mmapped, aligned to `vectors`
+    centroids: np.ndarray  # (nlist, 14) fp32, in-RAM (≈115 KB)
+    centroid_norms: np.ndarray  # (nlist,) fp32, in-RAM
+    cluster_offsets: np.ndarray  # (nlist + 1,) int64, in-RAM
     ivf_nprobe: int
 
 
 def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
     index_dir = Path(index_dir)
     meta = msgspec.json.decode((index_dir / META_FILENAME).read_bytes())
-    labels = np.load(index_dir / LABELS_FILENAME, mmap_mode='r')
-    with contextlib.suppress(AttributeError, OSError, ValueError):
-        labels._mmap.madvise(mmap.MADV_HUGEPAGE | mmap.MADV_WILLNEED)
 
-    nprobe = int(meta.get('ivf_nprobe', 8))
-    global_index = faiss.read_index(
-        str(index_dir / GLOBAL_INDEX_FILENAME),
-        faiss.IO_FLAG_MMAP,
+    labels = np.load(index_dir / LABELS_FILENAME, mmap_mode='r')
+    vectors = np.load(index_dir / VECTORS_FILENAME, mmap_mode='r')
+    vec_norms = np.load(index_dir / VEC_NORMS_FILENAME, mmap_mode='r')
+    cluster_labels = np.load(index_dir / LABELS_CLUSTER_FILENAME, mmap_mode='r')
+    for arr in (labels, vectors, vec_norms, cluster_labels):
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            arr._mmap.madvise(mmap.MADV_HUGEPAGE | mmap.MADV_WILLNEED)
+
+    centroids = np.ascontiguousarray(np.load(index_dir / CENTROIDS_FILENAME), dtype=np.float32)
+    centroid_norms = np.ascontiguousarray(
+        np.load(index_dir / CENTROID_NORMS_FILENAME), dtype=np.float32
     )
-    if isinstance(global_index, faiss.IndexIVF):
-        global_index.nprobe = nprobe
+    cluster_offsets = np.ascontiguousarray(
+        np.load(index_dir / CLUSTER_OFFSETS_FILENAME), dtype=np.int64
+    )
 
     return PartitionedIndex(
         labels=labels,
         boundaries=np.asarray(meta['boundaries'], dtype=np.uint32),
         fallbacks=np.asarray(meta['fallbacks'], dtype=np.uint8),
         homogeneous_score=np.asarray(meta['homogeneous_score'], dtype=np.float32),
-        global_index=global_index,
-        ivf_nprobe=nprobe,
+        vectors=vectors,
+        vec_norms=vec_norms,
+        cluster_labels=cluster_labels,
+        centroids=centroids,
+        centroid_norms=centroid_norms,
+        cluster_offsets=cluster_offsets,
+        ivf_nprobe=int(meta.get('ivf_nprobe', 12)),
     )

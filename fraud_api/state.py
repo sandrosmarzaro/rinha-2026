@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import faiss
 import numpy as np
 from loguru import logger
 
@@ -53,15 +52,25 @@ def _build_synthetic_index() -> PartitionedIndex:
         elif fraud_count == (end - start):
             homogeneous_score[k] = 1.0
 
-    global_index = faiss.IndexFlatL2(VECTOR_DIM)
-    global_index.add(np.ascontiguousarray(sorted_vectors, dtype=np.float32))
+    # Synthetic mode is for parity tests only — collapse everything into 1 cluster
+    # so the numpy IVF search degenerates to brute-force KNN over the small set.
+    vec = np.ascontiguousarray(sorted_vectors, dtype=np.float32)
+    centroids = vec.mean(axis=0, keepdims=True).astype(np.float32)
+    centroid_norms = np.einsum('ij,ij->i', centroids, centroids).astype(np.float32)
+    vec_norms = np.einsum('ij,ij->i', vec, vec).astype(np.float32)
+    cluster_offsets = np.array([0, SYNTHETIC_N], dtype=np.int64)
 
     return PartitionedIndex(
         labels=sorted_labels,
         boundaries=boundaries,
         fallbacks=compute_fallbacks(boundaries),
         homogeneous_score=homogeneous_score,
-        global_index=global_index,
+        vectors=vec,
+        vec_norms=vec_norms,
+        cluster_labels=sorted_labels,
+        centroids=centroids,
+        centroid_norms=centroid_norms,
+        cluster_offsets=cluster_offsets,
         ivf_nprobe=SYNTHETIC_NPROBE,
     )
 

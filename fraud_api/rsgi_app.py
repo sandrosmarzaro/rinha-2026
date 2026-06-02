@@ -41,8 +41,9 @@ class FraudApp:
 
     def __init__(self) -> None:
         self.data = build_app_data()
-        dummy = np.zeros((1, VECTOR_DIM), dtype=np.float32)
-        self.data.index.global_index.search(dummy, K_NEIGHBORS)
+        dummy = np.zeros(VECTOR_DIM, dtype=np.float32)
+        # Warm caches: pre-touch the centroid arrays and the vectors mmap.
+        partitioned_score(dummy, 0, self.data.index)
         logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
     async def __rsgi__(self, scope, proto) -> None:  # noqa: PLR0915
