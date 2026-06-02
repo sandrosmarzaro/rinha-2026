@@ -40,7 +40,7 @@ GLOBAL_INDEX_PATH = INDEX_DIR / 'global.faiss'
 
 VECTOR_DIM = 14
 GLOBAL_NLIST = 2048  # coarse clusters across the full 3M-vector index
-GLOBAL_NPROBE = 12  # lists scanned per query — peak of nprobe sweep at sim 0.17 CPU
+GLOBAL_NPROBE = 12  # lists scanned per query — peak of nprobe sweep at sim 0.16 CPU
 
 
 def _is_fresh() -> bool:
@@ -50,7 +50,7 @@ def _is_fresh() -> bool:
     return all(p.stat().st_mtime >= src_mtime for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915
     if _is_fresh():
         logger.info('index is fresh, skipping rebuild')
         return 0
@@ -95,19 +95,44 @@ def main() -> int:
     n_homogeneous = int((homogeneous_score >= 0).sum())
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
-    logger.info(
-        'building single global IVFFlat fp32 index (nlist={}, niter=25 nredo=4)',
-        GLOBAL_NLIST,
-    )
+    logger.info('training k-means coarse quantizer (nlist={}, niter=25 nredo=4)', GLOBAL_NLIST)
     quantizer = faiss.IndexFlatL2(VECTOR_DIM)
     global_idx = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
     global_idx.cp.niter = 25
     global_idx.cp.nredo = 4
     train_vectors = np.ascontiguousarray(vectors_sorted, dtype=np.float32)
     global_idx.train(train_vectors)
-    global_idx.add(train_vectors)
     global_idx.nprobe = GLOBAL_NPROBE
-    faiss.write_index(global_idx, str(GLOBAL_INDEX_PATH))
+    # Save the trained quantizer (IndexFlatL2 with 2048 centroids) standalone — loading
+    # the parent IVF via faiss.read_index returns a wrapped Index whose `quantizer`
+    # attribute can't be safely searched without SWIG downcasting, so we round-trip the
+    # quantizer separately to keep its concrete type.
+    faiss.write_index(quantizer, str(GLOBAL_INDEX_PATH))
+
+    logger.info('assigning vectors to clusters via the trained centroids')
+    _d, ivf_assign = global_idx.quantizer.search(train_vectors, 1)
+    ivf_assign = ivf_assign[:, 0]
+    cluster_counts = np.bincount(ivf_assign, minlength=GLOBAL_NLIST).astype(np.int64)
+    cluster_offsets = np.empty(GLOBAL_NLIST + 1, dtype=np.int64)
+    cluster_offsets[0] = 0
+    np.cumsum(cluster_counts, out=cluster_offsets[1:])
+    cluster_order = np.argsort(ivf_assign, kind='stable')
+    vectors_cluster_sorted = np.ascontiguousarray(train_vectors[cluster_order], dtype=np.float32)
+    labels_cluster_sorted = labels_sorted[cluster_order].astype(np.uint8, copy=False)
+
+    vectors_path = INDEX_DIR / 'vectors.npy'
+    labels_cluster_path = INDEX_DIR / 'labels_cluster.npy'
+    offsets_path = INDEX_DIR / 'cluster_offsets.npy'
+    np.save(vectors_path, vectors_cluster_sorted)
+    np.save(labels_cluster_path, labels_cluster_sorted)
+    np.save(offsets_path, cluster_offsets)
+    logger.info(
+        'cluster layout: min={} p50={} p99={} max={}',
+        int(cluster_counts.min()),
+        int(np.percentile(cluster_counts, 50)),
+        int(np.percentile(cluster_counts, 99)),
+        int(cluster_counts.max()),
+    )
 
     logger.info('writing {}', LABELS_PATH)
     np.save(LABELS_PATH, labels_sorted)
@@ -119,10 +144,21 @@ def main() -> int:
         'fallbacks': fallbacks.tolist(),
         'homogeneous_score': homogeneous_score.tolist(),
         'ivf_nprobe': GLOBAL_NPROBE,
+        'ivf_nlist': GLOBAL_NLIST,
     }
     META_PATH.write_bytes(msgspec.json.encode(meta))
 
-    total_bytes = sum(p.stat().st_size for p in (LABELS_PATH, META_PATH, GLOBAL_INDEX_PATH))
+    total_bytes = sum(
+        p.stat().st_size
+        for p in (
+            LABELS_PATH,
+            META_PATH,
+            GLOBAL_INDEX_PATH,
+            vectors_path,
+            labels_cluster_path,
+            offsets_path,
+        )
+    )
     logger.info('index built ({:.1f} MB on disk)', total_bytes / 1e6)
     return 0
 

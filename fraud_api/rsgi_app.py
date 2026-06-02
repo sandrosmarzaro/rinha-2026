@@ -42,7 +42,9 @@ class FraudApp:
     def __init__(self) -> None:
         self.data = build_app_data()
         dummy = np.zeros((1, VECTOR_DIM), dtype=np.float32)
-        self.data.index.global_index.search(dummy, K_NEIGHBORS)
+        # Warm the quantizer page-cache and pre-touch the largest cluster.
+        self.data.index.quantizer.search(dummy, 1)
+        _ = self.data.index.vectors[: min(1024, self.data.index.vectors.shape[0])].sum()
         logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
     async def __rsgi__(self, scope, proto) -> None:  # noqa: PLR0915
