@@ -17,7 +17,6 @@ search uses only numpy (centroid scan + cluster scan + norms-expansion distance)
 Idempotent: skips rebuild when index files are newer than the source.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -48,18 +47,6 @@ VECTOR_DIM = 14
 GLOBAL_NLIST = 2048
 GLOBAL_NPROBE = 12
 
-# Optional reference subsampling. Set env RINHA_SUBSAMPLE_FRAC=0.5 to keep 50% of refs.
-# 1.0 (default) = keep all 3M. Random subsample regrediu fortemente em sim (E=45 → 1271);
-# refs não são globalmente redundantes — preservar p/ smart ε-dedup que cuida só de
-# regiões puras-de-label.
-SUBSAMPLE_FRAC = float(os.environ.get('RINHA_SUBSAMPLE_FRAC', '1.0'))
-SUBSAMPLE_SEED = 7
-
-# Smart ε-dedup: dentro de cada cluster IVF, agrupa vetores em ε-balls e remove duplicates
-# APENAS quando todos os vetores da ball têm o mesmo label (preserva info de fronteira em
-# mixed-label balls). 0.0 desabilita.
-DEDUP_EPS = float(os.environ.get('RINHA_DEDUP_EPS', '0.0'))
-
 ARTIFACTS = (
     LABELS_PATH,
     META_PATH,
@@ -70,44 +57,6 @@ ARTIFACTS = (
     CENTROID_NORMS_PATH,
     CLUSTER_OFFSETS_PATH,
 )
-
-
-def _smart_dedup(
-    vectors: np.ndarray, labels: np.ndarray, eps: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """Within each preliminary IVF cluster, greedily collapse same-label ε-balls."""
-    logger.info('smart dedup (eps={:.4f}) — training pilot k-means', eps)
-    quant = faiss.IndexFlatL2(VECTOR_DIM)
-    pilot = faiss.IndexIVFFlat(quant, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
-    pilot.cp.niter = 10
-    pilot.cp.nredo = 1
-    pilot.train(vectors)
-    _d, assigns = pilot.quantizer.search(vectors, 1)
-    assigns = assigns[:, 0]
-
-    eps_sq = float(eps) * float(eps)
-    keep_mask = np.zeros(vectors.shape[0], dtype=bool)
-    for c in range(GLOBAL_NLIST):
-        ids = np.where(assigns == c)[0]
-        if ids.shape[0] == 0:
-            continue
-        local = vectors[ids]
-        local_labels = labels[ids]
-        taken = np.zeros(local.shape[0], dtype=bool)
-        for i in range(local.shape[0]):
-            if taken[i]:
-                continue
-            keep_mask[ids[i]] = True
-            taken[i] = True
-            diff = local[i + 1 :] - local[i]
-            d = np.einsum('ij,ij->i', diff, diff)
-            close = (d <= eps_sq) & (local_labels[i + 1 :] == local_labels[i])
-            taken[i + 1 :][close] = True
-    n_keep = int(keep_mask.sum())
-    logger.info(
-        'dedup kept {} of {} ({:.1f}%)', n_keep, vectors.shape[0], n_keep * 100 / vectors.shape[0]
-    )
-    return vectors[keep_mask], labels[keep_mask]
 
 
 def _is_fresh() -> bool:
@@ -127,18 +76,6 @@ def main() -> int:  # noqa: PLR0915
     logger.info('loading references from {}', REFERENCES_PATH)
     vectors_f32, labels = load_references(REFERENCES_PATH)
     logger.info('loaded {} vectors', len(vectors_f32))
-
-    if SUBSAMPLE_FRAC < 1.0:
-        rng = np.random.default_rng(SUBSAMPLE_SEED)
-        n_keep = int(len(vectors_f32) * SUBSAMPLE_FRAC)
-        keep_idx = rng.choice(len(vectors_f32), size=n_keep, replace=False)
-        keep_idx.sort()
-        vectors_f32 = vectors_f32[keep_idx]
-        labels = labels[keep_idx]
-        logger.info('subsampled to {} ({:.0%})', n_keep, SUBSAMPLE_FRAC)
-
-    if DEDUP_EPS > 0:
-        vectors_f32, labels = _smart_dedup(vectors_f32, labels.astype(np.uint8), DEDUP_EPS)
 
     logger.info('computing partition keys')
     keys = partition_keys_batch(vectors_f32)
