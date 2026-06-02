@@ -81,4 +81,7 @@ def vectorize(req: FraudRequest, mcc_risk: dict[str, float]) -> np.ndarray:
     v[11] = 0.0 if merch.id in cust.known_merchants else 1.0
     v[12] = mcc_risk.get(merch.mcc, DEFAULT_MCC_RISK)
     v[13] = _clamp_unit(merch.avg_amount / MAX_MERCHANT_AVG_AMOUNT)
+    # Match the data generator's round4 (refs are stored at 4-decimal precision,
+    # so the oracle KNN compares against round4'd queries).
+    np.round(v, 4, out=v)
     return v
