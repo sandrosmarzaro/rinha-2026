@@ -18,6 +18,9 @@ COPY data/references.json.gz data/mcc_risk.json data/normalization.json /app/dat
 
 RUN uv run python scripts/build_index.py
 
+# Pre-compile numba JIT kernels so first request isn't blocked by compilation
+RUN RINHA_DATA_DIR=/app/data uv run python -c "from fraud_api.state import build_app_data; from fraud_api.search import partitioned_score; import numpy as np; d=build_app_data(); partitioned_score(np.zeros(14, dtype=np.float32), 0, d.index)"
+
 
 FROM python:3.14-slim AS production
 
