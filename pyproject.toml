@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.1.0",
     "loguru>=0.7.3",
     "faiss-cpu>=1.14.2",
+    "uvloop>=0.22.1",
 ]
 
 [dependency-groups]

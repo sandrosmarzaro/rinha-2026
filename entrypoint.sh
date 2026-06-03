@@ -14,5 +14,8 @@ exec granian \
     --runtime-mode st \
     --http 1 \
     --no-ws \
+    --loop uvloop \
+    --task-impl rust \
+    --http1-pipeline-flush \
     --log-level warning \
     fraud_api.rsgi_app:app
