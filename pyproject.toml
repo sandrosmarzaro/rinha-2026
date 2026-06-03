@@ -10,6 +10,7 @@ dependencies = [
     "loguru>=0.7.3",
     "faiss-cpu>=1.14.2",
     "uvloop>=0.22.1",
+    "numba>=0.65.1",
 ]
 
 [dependency-groups]
