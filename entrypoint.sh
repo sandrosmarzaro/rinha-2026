@@ -10,7 +10,7 @@ umask 000
 exec granian \
     --interface rsgi \
     --uds "$RINHA_SOCKET" \
-    --workers 1 \
+    --workers 2 \
     --runtime-mode st \
     --http 1 \
     --no-ws \
