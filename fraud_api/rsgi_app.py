@@ -14,7 +14,7 @@ from loguru import logger
 from fraud_api import profile
 from fraud_api.partition import partition_key
 from fraud_api.schemas import FraudRequest, FraudResponse
-from fraud_api.search import K_NEIGHBORS, _knn_dists_numba, partitioned_score
+from fraud_api.search import K_NEIGHBORS, partitioned_score
 from fraud_api.state import build_app_data
 from fraud_api.vectorize import VECTOR_DIM, vectorize
 
@@ -42,20 +42,8 @@ class FraudApp:
     def __init__(self) -> None:
         self.data = build_app_data()
         dummy = np.zeros(VECTOR_DIM, dtype=np.float32)
-        # Warm caches AND force numba kernel compile on the real array types.
-        # partitioned_score may short-circuit on homogeneous partition before
-        # touching the JIT path — call the kernel directly with mmap-backed
-        # arrays so the first real request finds it compiled and cached.
-        idx = self.data.index
-        dists_buf = np.empty(8, dtype=np.float32)
-        ids_buf = np.empty(8, dtype=np.int64)
-        starts = idx.cluster_offsets[:1].astype(np.int64)
-        ends = idx.cluster_offsets[1:2].astype(np.int64)
-        ends[0] = min(int(ends[0]), int(starts[0]) + 4)  # tiny range, just to compile
-        _knn_dists_numba(
-            dummy, np.float32(0.0), idx.vectors, idx.vec_norms, starts, ends, dists_buf, ids_buf
-        )
-        partitioned_score(dummy, 0, idx)
+        # Warm caches: pre-touch the centroid arrays and the vectors mmap.
+        partitioned_score(dummy, 0, self.data.index)
         logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
     async def __rsgi__(self, scope, proto) -> None:  # noqa: PLR0915
