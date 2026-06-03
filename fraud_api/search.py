@@ -4,7 +4,7 @@ import knn_simd
 from fraud_api.index import PartitionedIndex
 
 K_NEIGHBORS: int = 5
-NPROBE: int = 64
+NPROBE: int = 32
 QUANT_SCALE: float = 10_000.0
 PADDED_DIM: int = 16
 
