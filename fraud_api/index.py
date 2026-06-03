@@ -19,6 +19,7 @@ LABELS_CLUSTER_FILENAME = 'labels_cluster.npy'
 CENTROIDS_FILENAME = 'centroids.npy'
 CENTROID_NORMS_FILENAME = 'centroid_norms.npy'
 CLUSTER_OFFSETS_FILENAME = 'cluster_offsets.npy'
+VECTORS_INT16_FILENAME = 'vectors_int16.npy'
 
 
 def load_references(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
@@ -50,6 +51,7 @@ class PartitionedIndex:
     centroid_norms: np.ndarray  # (nlist,) fp32, in-RAM
     cluster_offsets: np.ndarray  # (nlist + 1,) int64, in-RAM
     ivf_nprobe: int
+    vectors_int16: np.ndarray  # (N, 16) int16, mmapped — for AVX2 SIMD kernel
 
 
 def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
@@ -60,7 +62,8 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
     vectors = np.load(index_dir / VECTORS_FILENAME, mmap_mode='r')
     vec_norms = np.load(index_dir / VEC_NORMS_FILENAME, mmap_mode='r')
     cluster_labels = np.load(index_dir / LABELS_CLUSTER_FILENAME, mmap_mode='r')
-    for arr in (labels, vectors, vec_norms, cluster_labels):
+    vectors_int16 = np.load(index_dir / VECTORS_INT16_FILENAME, mmap_mode='r')
+    for arr in (labels, vectors, vec_norms, cluster_labels, vectors_int16):
         with contextlib.suppress(AttributeError, OSError, ValueError):
             arr._mmap.madvise(mmap.MADV_HUGEPAGE | mmap.MADV_WILLNEED)
 
@@ -84,4 +87,5 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
         centroid_norms=centroid_norms,
         cluster_offsets=cluster_offsets,
         ivf_nprobe=int(meta.get('ivf_nprobe', 12)),
+        vectors_int16=vectors_int16,
     )

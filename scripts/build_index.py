@@ -42,8 +42,11 @@ LABELS_CLUSTER_PATH = INDEX_DIR / 'labels_cluster.npy'
 CENTROIDS_PATH = INDEX_DIR / 'centroids.npy'
 CENTROID_NORMS_PATH = INDEX_DIR / 'centroid_norms.npy'
 CLUSTER_OFFSETS_PATH = INDEX_DIR / 'cluster_offsets.npy'
+VECTORS_INT16_PATH = INDEX_DIR / 'vectors_int16.npy'
 
 VECTOR_DIM = 14
+PADDED_DIM = 16  # 14 dims + 2 zero-pad lanes → fits one 256-bit AVX2 register
+QUANT_SCALE = 10_000  # lossless: refs are round4'd to 4 decimals
 GLOBAL_NLIST = 2048
 GLOBAL_NPROBE = 12
 
@@ -56,6 +59,7 @@ ARTIFACTS = (
     CENTROIDS_PATH,
     CENTROID_NORMS_PATH,
     CLUSTER_OFFSETS_PATH,
+    VECTORS_INT16_PATH,
 )
 
 
@@ -143,6 +147,17 @@ def main() -> int:  # noqa: PLR0915
         int(cluster_counts.max()),
     )
 
+    # Quantize cluster-sorted vectors to int16 with PADDED_DIM lanes for AVX2.
+    # Refs are round4'd by the data generator → multiplying by 10000 is lossless.
+    logger.info(
+        'quantizing vectors to int16 (scale={}, padded {} → {} lanes)',
+        QUANT_SCALE,
+        VECTOR_DIM,
+        PADDED_DIM,
+    )
+    vectors_int16 = np.zeros((len(vectors_cluster), PADDED_DIM), dtype=np.int16)
+    vectors_int16[:, :VECTOR_DIM] = np.rint(vectors_cluster * QUANT_SCALE).astype(np.int16)
+
     logger.info('writing numpy artifacts')
     np.save(LABELS_PATH, labels_sorted)
     np.save(VECTORS_PATH, vectors_cluster)
@@ -151,6 +166,7 @@ def main() -> int:  # noqa: PLR0915
     np.save(CENTROIDS_PATH, centroids)
     np.save(CENTROID_NORMS_PATH, centroid_norms)
     np.save(CLUSTER_OFFSETS_PATH, cluster_offsets)
+    np.save(VECTORS_INT16_PATH, vectors_int16)
 
     meta = {
         'n_partitions': N_PARTITIONS,

@@ -25,3 +25,10 @@ data/
 bench/
 
 .claude/settings.local.json
+
+# Rust crate build artifacts
+knn_simd/target/
+knn_simd/uv.lock
+
+# Sim compose (gitignored — local-only)
+docker-compose.sim.yml

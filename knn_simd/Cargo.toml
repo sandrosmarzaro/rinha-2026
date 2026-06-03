@@ -1,0 +1,19 @@
+[package]
+name = "knn_simd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "knn_simd"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+numpy = "0.23"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
