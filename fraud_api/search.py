@@ -4,7 +4,8 @@ import knn_simd
 from fraud_api.index import PartitionedIndex
 
 K_NEIGHBORS: int = 5
-NPROBE: int = 32
+NPROBE: int = 32  # inner cells, scanned by every boundary query
+NPROBE_REFINE: int = 64  # extended scan when top-5 vote lands at fc ∈ {2, 3}
 QUANT_SCALE: float = 10_000.0
 PADDED_DIM: int = 16
 
@@ -46,15 +47,18 @@ def partitioned_score(
 
     q_norm = float(query @ query)
     centroid_dists = index.centroid_norms + q_norm - 2.0 * (index.centroids @ query)
-    cells = np.argpartition(centroid_dists, NPROBE - 1)[:NPROBE].astype(np.int64)
+    cells = np.argpartition(centroid_dists, NPROBE_REFINE - 1)[:NPROBE_REFINE]
+    # Sort the probed cells by ascending centroid distance — the smart kernel
+    # relies on this order for class-aware early-stop and two-stage re-probe.
+    cells = cells[np.argsort(centroid_dists[cells])].astype(np.int64)
 
-    # Quantize query into the pre-allocated int16 buffer (last 2 lanes stay 0).
     np.rint(query * QUANT_SCALE, out=_QUERY_INT16[:14], casting='unsafe')
-    fc = knn_simd.knn_top5_fraud_count(
+    fc = knn_simd.knn_top5_smart(
         _QUERY_INT16,
         index.vectors_int16,
         index.cluster_labels,
         index.cluster_offsets,
         cells,
+        NPROBE,
     )
     return float(fc) / k
