@@ -70,7 +70,7 @@ def vectorize(req: FraudRequest, mcc_risk: dict[str, float]) -> np.ndarray:
         v[6] = MISSING_SENTINEL
     else:
         last_at = _parse_iso(req.last_transaction.timestamp)
-        minutes = (when - last_at).total_seconds() / SECONDS_PER_MINUTE
+        minutes = abs((when - last_at).total_seconds()) / SECONDS_PER_MINUTE
         v[5] = _clamp_unit(minutes / MAX_MINUTES)
         v[6] = _clamp_unit(req.last_transaction.km_from_current / MAX_KM)
 
