@@ -11,9 +11,93 @@
 //! This is the scalar/portable implementation. The AVX2 SIMD path is gated
 //! behind a runtime check in `is_x86_feature_detected!("avx2")`.
 
+use numpy::IntoPyArray;
+use numpy::PyArray1;
 use numpy::PyReadonlyArray1;
 use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
+
+const PADDED_DIM: usize = 16;
+const QUANT_SCALE: f32 = 10_000.0;
+const MAX_AMOUNT: f32 = 10_000.0;
+const MAX_INSTALLMENTS: f32 = 12.0;
+const AMOUNT_VS_AVG_RATIO: f32 = 10.0;
+const MAX_MINUTES: f32 = 1440.0;
+const MAX_KM: f32 = 1000.0;
+const MAX_TX_COUNT_24H: f32 = 20.0;
+const MAX_MERCHANT_AVG_AMOUNT: f32 = 10_000.0;
+const HOURS_DIVISOR: f32 = 23.0;
+const WEEKDAY_DIVISOR: f32 = 6.0;
+const MISSING_SENTINEL_SCALED: i16 = -10_000;
+
+#[inline(always)]
+fn parse_u32_n(bytes: &[u8]) -> u32 {
+    let mut v = 0u32;
+    for &b in bytes {
+        v = v * 10 + (b - b'0') as u32;
+    }
+    v
+}
+
+#[inline]
+fn iso_to_epoch_seconds(s: &[u8]) -> i64 {
+    let year = parse_u32_n(&s[0..4]) as i32;
+    let month = parse_u32_n(&s[5..7]);
+    let day = parse_u32_n(&s[8..10]);
+    let hour = parse_u32_n(&s[11..13]);
+    let minute = parse_u32_n(&s[14..16]);
+    let second = parse_u32_n(&s[17..19]);
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146097 + doe as i64 - 719468;
+    days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64
+}
+
+#[inline]
+fn weekday_mon0(s: &[u8]) -> u32 {
+    let year = parse_u32_n(&s[0..4]) as i32;
+    let month = parse_u32_n(&s[5..7]);
+    let day = parse_u32_n(&s[8..10]);
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146097 + doe as i64 - 719468;
+    ((days + 3).rem_euclid(7)) as u32
+}
+
+#[inline(always)]
+fn q_round_clamp01(x: f32) -> i16 {
+    let c = x.clamp(0.0, 1.0);
+    (c * QUANT_SCALE).round() as i16
+}
+
+#[inline(always)]
+fn q_round_signed(x: f32) -> i16 {
+    let c = x.clamp(-1.0, 1.0);
+    (c * QUANT_SCALE).round() as i16
+}
+
+#[inline]
+fn mcc_risk(mcc: &[u8]) -> f32 {
+    match mcc {
+        b"4511" => 0.35,
+        b"5311" => 0.25,
+        b"5411" => 0.15,
+        b"5812" => 0.30,
+        b"5912" => 0.20,
+        b"5944" => 0.45,
+        b"5999" => 0.50,
+        b"7801" => 0.80,
+        b"7802" => 0.75,
+        b"7995" => 0.85,
+        _ => 0.50,
+    }
+}
 
 /// Insertion-sort-style top-5 buffer keyed by distance.
 #[derive(Copy, Clone)]
@@ -208,8 +292,92 @@ fn knn_top5_fraud_count(
     Ok(top5.fraud_count())
 }
 
+const AMOUNT_CUTS: [i16; 3] = [50, 200, 1000];
+const MCC_CUTS: [i16; 7] = [1000, 2000, 3000, 4000, 5000, 6000, 8000];
+
+/// Bucket index = count of cuts that `q` is >= to (mirrors `np.searchsorted(side='right')`).
+#[inline(always)]
+fn bucket(cuts: &[i16], q: i16) -> u32 {
+    cuts.iter().filter(|&&c| q >= c).count() as u32
+}
+
+/// Vectorize a payload into a 16-lane i16 buffer AND compute its 8-bit
+/// partition key in one pass. ISO timestamps are parsed by byte slicing —
+/// no datetime overhead. Sentinel dims 5/6 are `-10000` when `last_ts` is None.
+///
+/// Returns `(np.ndarray[i16] shape (16,), partition_key: int)`.
+#[pyfunction]
+#[pyo3(signature = (
+    amount, installments, requested_at, avg_amount, tx_count_24h,
+    merchant_unknown, mcc, merchant_avg_amount,
+    is_online, card_present, km_from_home,
+    last_ts=None, last_km=0.0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn vectorize_to_i16<'py>(
+    py: Python<'py>,
+    amount: f32,
+    installments: f32,
+    requested_at: &str,
+    avg_amount: f32,
+    tx_count_24h: f32,
+    merchant_unknown: bool,
+    mcc: &str,
+    merchant_avg_amount: f32,
+    is_online: bool,
+    card_present: bool,
+    km_from_home: f32,
+    last_ts: Option<&str>,
+    last_km: f32,
+) -> PyResult<(Bound<'py, PyArray1<i16>>, u32)> {
+    let req_bytes = requested_at.as_bytes();
+    let hour = parse_u32_n(&req_bytes[11..13]).min(23) as f32;
+    let weekday = weekday_mon0(req_bytes) as f32;
+
+    let avg_safe = if avg_amount > 0.0 { avg_amount } else { 1.0 };
+
+    let (dim5, dim6) = match last_ts {
+        None => (MISSING_SENTINEL_SCALED, MISSING_SENTINEL_SCALED),
+        Some(ts) => {
+            let req_secs = iso_to_epoch_seconds(req_bytes);
+            let last_secs = iso_to_epoch_seconds(ts.as_bytes());
+            let mins = (req_secs - last_secs).unsigned_abs() as f32 / 60.0;
+            (
+                q_round_clamp01(mins / MAX_MINUTES),
+                q_round_clamp01(last_km / MAX_KM),
+            )
+        }
+    };
+
+    let mut out = [0i16; PADDED_DIM];
+    out[0] = q_round_clamp01(amount / MAX_AMOUNT);
+    out[1] = q_round_clamp01(installments / MAX_INSTALLMENTS);
+    out[2] = q_round_clamp01((amount / avg_safe) / AMOUNT_VS_AVG_RATIO);
+    out[3] = q_round_signed(hour / HOURS_DIVISOR);
+    out[4] = q_round_signed(weekday / WEEKDAY_DIVISOR);
+    out[5] = dim5;
+    out[6] = dim6;
+    out[7] = q_round_clamp01(km_from_home / MAX_KM);
+    out[8] = q_round_clamp01(tx_count_24h / MAX_TX_COUNT_24H);
+    out[9] = if is_online { QUANT_SCALE as i16 } else { 0 };
+    out[10] = if card_present { QUANT_SCALE as i16 } else { 0 };
+    out[11] = if merchant_unknown { QUANT_SCALE as i16 } else { 0 };
+    out[12] = (mcc_risk(mcc.as_bytes()) * QUANT_SCALE).round() as i16;
+    out[13] = q_round_clamp01(merchant_avg_amount / MAX_MERCHANT_AVG_AMOUNT);
+    // dims 14, 15 stay 0 (AVX2 pad)
+
+    let key = u32::from(is_online)
+        | (u32::from(card_present) << 1)
+        | (u32::from(merchant_unknown) << 2)
+        | (bucket(&AMOUNT_CUTS, out[0]) << 3)
+        | (bucket(&MCC_CUTS, out[12]) << 5);
+
+    Ok((out.to_vec().into_pyarray(py), key))
+}
+
 #[pymodule]
 fn knn_simd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(knn_top5_fraud_count, m)?)?;
+    m.add_function(wrap_pyfunction!(vectorize_to_i16, m)?)?;
     Ok(())
 }

@@ -6,7 +6,7 @@ import pytest
 
 from fraud_api.index import load_references
 from fraud_api.partition import partition_key
-from fraud_api.search import K_NEIGHBORS, brute_force_score, partitioned_score
+from fraud_api.search import K_NEIGHBORS, QUANT_SCALE, brute_force_score, partitioned_score
 from fraud_api.state import AppData, build_app_data
 
 PARITY_SAMPLES = 1000
@@ -50,8 +50,10 @@ def test_partitioned_matches_brute_force(
             oracle_labels,
             k=K_NEIGHBORS,
         )
+        q_i16 = np.zeros(16, dtype=np.int16)
+        q_i16[:14] = np.rint(q_f32 * QUANT_SCALE).clip(-32768, 32767).astype(np.int16)
         actual_score = partitioned_score(
-            q_f32,
+            q_i16,
             partition_key(q_f32),
             data.index,
             k=K_NEIGHBORS,

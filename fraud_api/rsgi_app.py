@@ -11,12 +11,11 @@ import msgspec
 import numpy as np
 from loguru import logger
 
+import knn_simd
 from fraud_api import profile
-from fraud_api.partition import partition_key
 from fraud_api.schemas import FraudRequest, FraudResponse
 from fraud_api.search import K_NEIGHBORS, partitioned_score
 from fraud_api.state import build_app_data
-from fraud_api.vectorize import VECTOR_DIM, vectorize
 
 FRAUD_THRESHOLD: Final = 0.6
 LEGIT_AMT_RATIO_THRESHOLD: Final = 0.971
@@ -41,9 +40,9 @@ class FraudApp:
 
     def __init__(self) -> None:
         self.data = build_app_data()
-        dummy = np.zeros(VECTOR_DIM, dtype=np.float32)
         # Warm caches: pre-touch the centroid arrays and the vectors mmap.
-        partitioned_score(dummy, 0, self.data.index)
+        dummy_i16 = np.zeros(16, dtype=np.int16)
+        partitioned_score(dummy_i16, 0, self.data.index)
         logger.info('rsgi app ready (profile={})', profile.ENABLED)
 
     async def __rsgi__(self, scope, proto) -> None:  # noqa: PLR0915
@@ -84,11 +83,29 @@ class FraudApp:
                 profile.record('total', t_end - t0)
                 return
             t3 = profile.now_ns()
-            q = vectorize(payload, self.data.mcc_risk)
-            t4 = profile.now_ns()
-            key = partition_key(q)
+            tx = payload.transaction
+            cust = payload.customer
+            merch = payload.merchant
+            term = payload.terminal
+            last = payload.last_transaction
+            q_i16, key = knn_simd.vectorize_to_i16(
+                tx.amount,
+                float(tx.installments),
+                tx.requested_at,
+                cust.avg_amount,
+                float(cust.tx_count_24h),
+                merch.id not in cust.known_merchants,
+                merch.mcc,
+                merch.avg_amount,
+                term.is_online,
+                term.card_present,
+                term.km_from_home,
+                last.timestamp if last is not None else None,
+                last.km_from_current if last is not None else 0.0,
+            )
+            t4 = t3
             t5 = profile.now_ns()
-            score = partitioned_score(q, key, self.data.index)
+            score = partitioned_score(q_i16, int(key), self.data.index)
             t6 = profile.now_ns()
             proto.response_bytes(200, _HEADERS, _BODIES[round(score * K_NEIGHBORS)])
             t_end = profile.now_ns()
