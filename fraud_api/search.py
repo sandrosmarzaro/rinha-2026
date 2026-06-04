@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 import knn_simd
@@ -6,6 +8,13 @@ from fraud_api.index import PartitionedIndex
 K_NEIGHBORS: int = 5
 QUANT_SCALE: float = 10_000.0
 PADDED_DIM: int = 16
+# Early-exit threshold for cross-partition scan: if primary partition's worst-of-top-5
+# squared distance (i16 lanes, scale 10000) is below this, accept the result without
+# scanning the remaining partitions. 2_000_000 ≈ (0.14)²·scale² — empirical sweep
+# (build/sweep_early_limit) showed detection stays at FP=29 FN=0 up to ~2M; above 5M
+# the primary loses true 5-NN. Override with RINHA_EARLY_LIMIT for diagnostics.
+DEFAULT_EARLY_LIMIT: int = 2_000_000
+EARLY_LIMIT: int = int(os.environ.get('RINHA_EARLY_LIMIT') or DEFAULT_EARLY_LIMIT)
 
 
 def brute_force_score(
@@ -52,5 +61,6 @@ def partitioned_score(
         index.partition_bbox_min,
         index.partition_bbox_max,
         real_key,
+        EARLY_LIMIT,
     )
     return float(fc) / k

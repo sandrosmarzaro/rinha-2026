@@ -514,6 +514,7 @@ fn knn_top5_kdtree_partitioned(
     partition_bbox_min: PyReadonlyArray2<i16>,
     partition_bbox_max: PyReadonlyArray2<i16>,
     primary_key: u32,
+    early_limit: i64,
 ) -> PyResult<i32> {
     let q = query.as_slice()?;
     let v = vectors.as_slice()?;
@@ -536,14 +537,15 @@ fn knn_top5_kdtree_partitioned(
                 unsafe {
                     knn_partitioned_avx2(
                         q, v, lbl, nmn, nmx, nl, nr, ns, nlen, proots, pmin, pmax, primary,
-                        &mut top5,
+                        early_limit, &mut top5,
                     );
                 }
                 return;
             }
         }
         knn_partitioned_scalar(
-            q, v, lbl, nmn, nmx, nl, nr, ns, nlen, proots, pmin, pmax, primary, &mut top5,
+            q, v, lbl, nmn, nmx, nl, nr, ns, nlen, proots, pmin, pmax, primary, early_limit,
+            &mut top5,
         );
     });
     Ok(top5.fraud_count())
@@ -564,6 +566,7 @@ fn knn_partitioned_scalar(
     partition_bbox_min: &[i16],
     partition_bbox_max: &[i16],
     primary: usize,
+    early_limit: i64,
     top5: &mut Top5,
 ) {
     // Walk primary partition first (lb=0 since the query is "inside" by routing).
@@ -572,6 +575,14 @@ fn knn_partitioned_scalar(
         query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
         nodes_len, primary_root, 0, top5,
     );
+    // Early exit: if the primary already produced a tight top-5 (worst dist
+    // below the configured threshold), accept it as the answer. Approximation:
+    // a closer neighbor in another partition would still be possible, but the
+    // partition_key routing aligns refs by discriminative features so a tight
+    // primary result is usually decisive.
+    if top5.worst() < early_limit {
+        return;
+    }
     // Score remaining non-empty partitions by their root-bbox lower bound.
     let n_parts = partition_roots.len();
     let mut probes: Vec<(i64, i32)> = Vec::with_capacity(n_parts);
@@ -618,6 +629,7 @@ unsafe fn knn_partitioned_avx2(
     partition_bbox_min: &[i16],
     partition_bbox_max: &[i16],
     primary: usize,
+    early_limit: i64,
     top5: &mut Top5,
 ) {
     let primary_root = partition_roots[primary];
@@ -625,6 +637,9 @@ unsafe fn knn_partitioned_avx2(
         query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
         nodes_len, primary_root, 0, top5,
     );
+    if top5.worst() < early_limit {
+        return;
+    }
     let q_ptr = query.as_ptr();
     let pmin_base = partition_bbox_min.as_ptr();
     let pmax_base = partition_bbox_max.as_ptr();
