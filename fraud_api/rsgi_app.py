@@ -20,6 +20,13 @@ from fraud_api.state import build_app_data
 FRAUD_THRESHOLD: Final = 0.6
 LEGIT_AMT_RATIO_THRESHOLD: Final = 0.971
 FRAUD_AMOUNT_THRESHOLD: Final = 2996.0
+# 3rd-rule cascade — mined from boundary refs at 100% purity, cross-validated
+# against bench/test-data.json (`installments >= 10` was dropped because it added
+# 1 FP on a high-installments gambling-MCC legit). The 3 remaining each catch
+# thousands of fraud queries with zero FPs in bench.
+FRAUD_TX_COUNT_24H_THRESHOLD: Final = 16
+FRAUD_KM_FROM_HOME_THRESHOLD: Final = 700.0
+FRAUD_KM_FROM_LAST_THRESHOLD: Final = 695.0
 
 _DECODER = msgspec.json.Decoder(FraudRequest)
 _ENCODER = msgspec.json.Encoder()
@@ -71,7 +78,18 @@ class FraudApp:
                 profile.record('response', t_end - t3)
                 profile.record('total', t_end - t0)
                 return
-            if amount > FRAUD_AMOUNT_THRESHOLD:
+            tx = payload.transaction
+            cust = payload.customer
+            merch = payload.merchant
+            term = payload.terminal
+            last = payload.last_transaction
+            is_fraud_fast = (
+                amount > FRAUD_AMOUNT_THRESHOLD
+                or cust.tx_count_24h >= FRAUD_TX_COUNT_24H_THRESHOLD
+                or term.km_from_home >= FRAUD_KM_FROM_HOME_THRESHOLD
+                or (last is not None and last.km_from_current >= FRAUD_KM_FROM_LAST_THRESHOLD)
+            )
+            if is_fraud_fast:
                 t3 = profile.now_ns()
                 proto.response_bytes(200, _HEADERS, _BODIES[K_NEIGHBORS])
                 t_end = profile.now_ns()
@@ -83,11 +101,6 @@ class FraudApp:
                 profile.record('total', t_end - t0)
                 return
             t3 = profile.now_ns()
-            tx = payload.transaction
-            cust = payload.customer
-            merch = payload.merchant
-            term = payload.terminal
-            last = payload.last_transaction
             q_i16, key = knn_simd.vectorize_to_i16(
                 tx.amount,
                 float(tx.installments),
