@@ -38,7 +38,7 @@ def partitioned_score(
     if homogeneous >= 0.0:
         return homogeneous
 
-    fc = knn_simd.knn_top5_kdtree(
+    fc = knn_simd.knn_top5_kdtree_partitioned(
         q_i16,
         index.vectors_kd,
         index.labels_kd,
@@ -48,5 +48,9 @@ def partitioned_score(
         index.kd_nodes_right,
         index.kd_nodes_start,
         index.kd_nodes_len,
+        index.partition_roots,
+        index.partition_bbox_min,
+        index.partition_bbox_max,
+        real_key,
     )
     return float(fc) / k

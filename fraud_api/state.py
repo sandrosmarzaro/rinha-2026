@@ -56,6 +56,15 @@ def _build_synthetic_index() -> PartitionedIndex:
     vec = np.ascontiguousarray(sorted_vectors, dtype=np.float32)
     vectors_kd_i16 = np.zeros((SYNTHETIC_N, 16), dtype=np.int16)
     vectors_kd_i16[:, :VECTOR_DIM] = np.rint(vec * 10_000).astype(np.int16)
+    # Synthetic: single partition (0) gets the whole single-leaf tree, others empty.
+    bbox_min = vectors_kd_i16.min(axis=0).astype(np.int16)
+    bbox_max = vectors_kd_i16.max(axis=0).astype(np.int16)
+    partition_roots = np.full(N_PARTITIONS, -1, dtype=np.int32)
+    partition_roots[0] = 0
+    partition_bbox_min = np.zeros((N_PARTITIONS, 16), dtype=np.int16)
+    partition_bbox_max = np.zeros((N_PARTITIONS, 16), dtype=np.int16)
+    partition_bbox_min[0] = bbox_min
+    partition_bbox_max[0] = bbox_max
     return PartitionedIndex(
         labels=sorted_labels,
         boundaries=boundaries,
@@ -63,12 +72,15 @@ def _build_synthetic_index() -> PartitionedIndex:
         homogeneous_score=homogeneous_score,
         vectors_kd=vectors_kd_i16,
         labels_kd=sorted_labels.astype(np.uint8),
-        kd_nodes_min=vectors_kd_i16.min(axis=0, keepdims=True).astype(np.int16),
-        kd_nodes_max=vectors_kd_i16.max(axis=0, keepdims=True).astype(np.int16),
+        kd_nodes_min=bbox_min.reshape(1, 16),
+        kd_nodes_max=bbox_max.reshape(1, 16),
         kd_nodes_left=np.array([-1], dtype=np.int32),
         kd_nodes_right=np.array([-1], dtype=np.int32),
         kd_nodes_start=np.array([0], dtype=np.uint32),
         kd_nodes_len=np.array([SYNTHETIC_N], dtype=np.uint32),
+        partition_roots=partition_roots,
+        partition_bbox_min=partition_bbox_min,
+        partition_bbox_max=partition_bbox_max,
     )
 
 

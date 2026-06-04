@@ -292,14 +292,19 @@ fn kdtree_scan_scalar(
     nodes_right: &[i32],
     nodes_start: &[u32],
     nodes_len: &[u32],
+    root: i32,
+    root_lb: i64,
     top5: &mut Top5,
 ) {
+    if root < 0 {
+        return;
+    }
     const STACK_CAP: usize = 128;
     let mut stack_idx = [0i32; STACK_CAP];
     let mut stack_lb = [0i64; STACK_CAP];
     let mut sp = 0usize;
-    let mut cur: i32 = 0;
-    let mut cur_lb: i64 = 0;
+    let mut cur: i32 = root;
+    let mut cur_lb: i64 = root_lb;
     loop {
         if cur_lb >= top5.worst() {
             if sp == 0 {
@@ -369,14 +374,19 @@ unsafe fn kdtree_scan_avx2(
     nodes_right: &[i32],
     nodes_start: &[u32],
     nodes_len: &[u32],
+    root: i32,
+    root_lb: i64,
     top5: &mut Top5,
 ) {
+    if root < 0 {
+        return;
+    }
     const STACK_CAP: usize = 128;
     let mut stack_idx = [0i32; STACK_CAP];
     let mut stack_lb = [0i64; STACK_CAP];
     let mut sp = 0usize;
-    let mut cur: i32 = 0;
-    let mut cur_lb: i64 = 0;
+    let mut cur: i32 = root;
+    let mut cur_lb: i64 = root_lb;
     let q_ptr = query.as_ptr();
     let vec_base = vectors.as_ptr();
     let lbl_base = labels.as_ptr();
@@ -470,14 +480,179 @@ fn knn_top5_kdtree(
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
-                    kdtree_scan_avx2(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, &mut top5);
+                    kdtree_scan_avx2(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, 0, 0, &mut top5);
                 }
                 return;
             }
         }
-        kdtree_scan_scalar(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, &mut top5);
+        kdtree_scan_scalar(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, 0, 0, &mut top5);
     });
     Ok(top5.fraud_count())
+}
+
+/// Python-facing exact KNN over per-partition KD-trees with cross-partition bbox prune.
+///
+/// Walks the primary partition's tree first (cheap, small), then iterates the
+/// remaining non-empty partitions in ascending bbox-lower-bound order with
+/// prune. Equivalent in result to walking a global tree, but the primary-first
+/// ordering tightens `top5.worst()` early so most cross-partition trees get
+/// skipped by their root bbox.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn knn_top5_kdtree_partitioned(
+    py: Python<'_>,
+    query: PyReadonlyArray1<i16>,
+    vectors: PyReadonlyArray2<i16>,
+    labels: PyReadonlyArray1<u8>,
+    nodes_min: PyReadonlyArray2<i16>,
+    nodes_max: PyReadonlyArray2<i16>,
+    nodes_left: PyReadonlyArray1<i32>,
+    nodes_right: PyReadonlyArray1<i32>,
+    nodes_start: PyReadonlyArray1<u32>,
+    nodes_len: PyReadonlyArray1<u32>,
+    partition_roots: PyReadonlyArray1<i32>,
+    partition_bbox_min: PyReadonlyArray2<i16>,
+    partition_bbox_max: PyReadonlyArray2<i16>,
+    primary_key: u32,
+) -> PyResult<i32> {
+    let q = query.as_slice()?;
+    let v = vectors.as_slice()?;
+    let lbl = labels.as_slice()?;
+    let nmn = nodes_min.as_slice()?;
+    let nmx = nodes_max.as_slice()?;
+    let nl = nodes_left.as_slice()?;
+    let nr = nodes_right.as_slice()?;
+    let ns = nodes_start.as_slice()?;
+    let nlen = nodes_len.as_slice()?;
+    let proots = partition_roots.as_slice()?;
+    let pmin = partition_bbox_min.as_slice()?;
+    let pmax = partition_bbox_max.as_slice()?;
+    let primary = primary_key as usize;
+    let mut top5 = Top5::new();
+    py.allow_threads(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    knn_partitioned_avx2(
+                        q, v, lbl, nmn, nmx, nl, nr, ns, nlen, proots, pmin, pmax, primary,
+                        &mut top5,
+                    );
+                }
+                return;
+            }
+        }
+        knn_partitioned_scalar(
+            q, v, lbl, nmn, nmx, nl, nr, ns, nlen, proots, pmin, pmax, primary, &mut top5,
+        );
+    });
+    Ok(top5.fraud_count())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knn_partitioned_scalar(
+    query: &[i16],
+    vectors: &[i16],
+    labels: &[u8],
+    nodes_min: &[i16],
+    nodes_max: &[i16],
+    nodes_left: &[i32],
+    nodes_right: &[i32],
+    nodes_start: &[u32],
+    nodes_len: &[u32],
+    partition_roots: &[i32],
+    partition_bbox_min: &[i16],
+    partition_bbox_max: &[i16],
+    primary: usize,
+    top5: &mut Top5,
+) {
+    // Walk primary partition first (lb=0 since the query is "inside" by routing).
+    let primary_root = partition_roots[primary];
+    kdtree_scan_scalar(
+        query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
+        nodes_len, primary_root, 0, top5,
+    );
+    // Score remaining non-empty partitions by their root-bbox lower bound.
+    let n_parts = partition_roots.len();
+    let mut probes: Vec<(i64, i32)> = Vec::with_capacity(n_parts);
+    for (p, &root) in partition_roots.iter().enumerate() {
+        if p == primary || root < 0 {
+            continue;
+        }
+        let off = p * PADDED_DIM;
+        let lb = bbox_lb_scalar(
+            query,
+            &partition_bbox_min[off..off + PADDED_DIM],
+            &partition_bbox_max[off..off + PADDED_DIM],
+        );
+        if lb < top5.worst() {
+            probes.push((lb, root));
+        }
+    }
+    probes.sort_unstable_by_key(|&(lb, _)| lb);
+    for (lb, root) in probes {
+        if lb >= top5.worst() {
+            break;
+        }
+        kdtree_scan_scalar(
+            query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
+            nodes_len, root, lb, top5,
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn knn_partitioned_avx2(
+    query: &[i16],
+    vectors: &[i16],
+    labels: &[u8],
+    nodes_min: &[i16],
+    nodes_max: &[i16],
+    nodes_left: &[i32],
+    nodes_right: &[i32],
+    nodes_start: &[u32],
+    nodes_len: &[u32],
+    partition_roots: &[i32],
+    partition_bbox_min: &[i16],
+    partition_bbox_max: &[i16],
+    primary: usize,
+    top5: &mut Top5,
+) {
+    let primary_root = partition_roots[primary];
+    kdtree_scan_avx2(
+        query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
+        nodes_len, primary_root, 0, top5,
+    );
+    let q_ptr = query.as_ptr();
+    let pmin_base = partition_bbox_min.as_ptr();
+    let pmax_base = partition_bbox_max.as_ptr();
+    let n_parts = partition_roots.len();
+    let mut probes: Vec<(i64, i32)> = Vec::with_capacity(n_parts);
+    for (p, &root) in partition_roots.iter().enumerate() {
+        if p == primary || root < 0 {
+            continue;
+        }
+        let lb = bbox_lb_avx2(
+            q_ptr,
+            pmin_base.add(p * PADDED_DIM),
+            pmax_base.add(p * PADDED_DIM),
+        );
+        if lb < top5.worst() {
+            probes.push((lb, root));
+        }
+    }
+    probes.sort_unstable_by_key(|&(lb, _)| lb);
+    for (lb, root) in probes {
+        if lb >= top5.worst() {
+            break;
+        }
+        kdtree_scan_avx2(
+            query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
+            nodes_len, root, lb, top5,
+        );
+    }
 }
 
 /// Python-facing IVF kernel.
@@ -612,6 +787,7 @@ fn vectorize_to_i16<'py>(
 fn knn_simd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(knn_top5_fraud_count, m)?)?;
     m.add_function(wrap_pyfunction!(knn_top5_kdtree, m)?)?;
+    m.add_function(wrap_pyfunction!(knn_top5_kdtree_partitioned, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize_to_i16, m)?)?;
     Ok(())
 }

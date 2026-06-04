@@ -1,18 +1,16 @@
-"""Build the global IVF index from references.json.gz.
+"""Build per-partition KD-tree indices from references.json.gz.
 
 Output:
     data/index/
-      labels.npy            uint8 (N,) global label array (sorted by partition key)
-      labels_cluster.npy    uint8 (N,) labels aligned to vectors.npy (cluster-sorted)
-      vectors.npy           fp32 (N, 14) all reference vectors sorted by IVF cluster
-      vec_norms.npy         fp32 (N,) precomputed ||vec||² per vector
-      centroids.npy         fp32 (nlist, 14) k-means centroids
-      centroid_norms.npy    fp32 (nlist,) precomputed ||centroid||²
-      cluster_offsets.npy   int64 (nlist+1,) cluster start offsets in vectors.npy
-      meta.json             {boundaries, fallbacks, homogeneous_score, ivf_nprobe, ivf_nlist}
-
-Faiss is used at BUILD time to run k-means (`IndexIVFFlat.train`); at RUNTIME the
-search uses only numpy (centroid scan + cluster scan + norms-expansion distance).
+      labels.npy              uint8 (N,) partition-sorted reference labels
+      vectors_kd.npy          int16 (N, 16) KD-reordered i16 vectors
+      labels_kd.npy           uint8 (N,) KD-reordered labels
+      kd_nodes_{min,max}.npy  int16 (n_nodes, 16) bbox per node
+      kd_nodes_{left,right}.npy int32 (n_nodes,) child indices (-1 if leaf)
+      kd_nodes_{start,len}.npy uint32 (n_nodes,) leaf vector range
+      partition_roots.npy     int32 (256,) root node per partition (-1 if empty)
+      partition_bbox_{min,max}.npy int16 (256, 16) bbox per partition root
+      meta.json               {boundaries, fallbacks, homogeneous_score}
 
 Idempotent: skips rebuild when index files are newer than the source.
 """
@@ -22,7 +20,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import faiss
 import msgspec
 import numpy as np
 from loguru import logger
@@ -36,13 +33,6 @@ INDEX_DIR = DATA_DIR / 'index'
 REFERENCES_PATH = DATA_DIR / 'references.json.gz'
 LABELS_PATH = INDEX_DIR / 'labels.npy'
 META_PATH = INDEX_DIR / 'meta.json'
-VECTORS_PATH = INDEX_DIR / 'vectors.npy'
-VEC_NORMS_PATH = INDEX_DIR / 'vec_norms.npy'
-LABELS_CLUSTER_PATH = INDEX_DIR / 'labels_cluster.npy'
-CENTROIDS_PATH = INDEX_DIR / 'centroids.npy'
-CENTROID_NORMS_PATH = INDEX_DIR / 'centroid_norms.npy'
-CLUSTER_OFFSETS_PATH = INDEX_DIR / 'cluster_offsets.npy'
-VECTORS_INT16_PATH = INDEX_DIR / 'vectors_int16.npy'
 KD_NODES_MIN_PATH = INDEX_DIR / 'kd_nodes_min.npy'
 KD_NODES_MAX_PATH = INDEX_DIR / 'kd_nodes_max.npy'
 KD_NODES_LEFT_PATH = INDEX_DIR / 'kd_nodes_left.npy'
@@ -51,24 +41,18 @@ KD_NODES_START_PATH = INDEX_DIR / 'kd_nodes_start.npy'
 KD_NODES_LEN_PATH = INDEX_DIR / 'kd_nodes_len.npy'
 VECTORS_KD_PATH = INDEX_DIR / 'vectors_kd.npy'
 LABELS_KD_PATH = INDEX_DIR / 'labels_kd.npy'
+PARTITION_ROOTS_PATH = INDEX_DIR / 'partition_roots.npy'
+PARTITION_BBOX_MIN_PATH = INDEX_DIR / 'partition_bbox_min.npy'
+PARTITION_BBOX_MAX_PATH = INDEX_DIR / 'partition_bbox_max.npy'
 
 VECTOR_DIM = 14
 PADDED_DIM = 16  # 14 dims + 2 zero-pad lanes → fits one 256-bit AVX2 register
 QUANT_SCALE = 10_000  # lossless: refs are round4'd to 4 decimals
-GLOBAL_NLIST = 2048
-GLOBAL_NPROBE = 12
 KDTREE_LEAF_SIZE = 64
 
 ARTIFACTS = (
     LABELS_PATH,
     META_PATH,
-    VECTORS_PATH,
-    VEC_NORMS_PATH,
-    LABELS_CLUSTER_PATH,
-    CENTROIDS_PATH,
-    CENTROID_NORMS_PATH,
-    CLUSTER_OFFSETS_PATH,
-    VECTORS_INT16_PATH,
     KD_NODES_MIN_PATH,
     KD_NODES_MAX_PATH,
     KD_NODES_LEFT_PATH,
@@ -77,7 +61,81 @@ ARTIFACTS = (
     KD_NODES_LEN_PATH,
     VECTORS_KD_PATH,
     LABELS_KD_PATH,
+    PARTITION_ROOTS_PATH,
+    PARTITION_BBOX_MIN_PATH,
+    PARTITION_BBOX_MAX_PATH,
 )
+
+
+def build_kdtree_partitioned(
+    vectors_int16: np.ndarray,
+    labels: np.ndarray,
+    boundaries: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build one KD-sub-tree per non-empty partition, concatenated into shared arrays.
+
+    Each partition's root is the first node of its sub-tree; child indices and
+    leaf vector offsets are biased into the global concatenated address space.
+    `partition_roots[k] = -1` marks empty partitions (caller falls back via the
+    Hamming-nearest map).
+    """
+    n_partitions = len(boundaries) - 1
+    partition_roots = np.full(n_partitions, -1, dtype=np.int32)
+    partition_bbox_min = np.zeros((n_partitions, PADDED_DIM), dtype=np.int16)
+    partition_bbox_max = np.zeros((n_partitions, PADDED_DIM), dtype=np.int16)
+
+    chunks_min: list[np.ndarray] = []
+    chunks_max: list[np.ndarray] = []
+    chunks_left: list[np.ndarray] = []
+    chunks_right: list[np.ndarray] = []
+    chunks_start: list[np.ndarray] = []
+    chunks_len: list[np.ndarray] = []
+    chunks_vecs: list[np.ndarray] = []
+    chunks_labels: list[np.ndarray] = []
+    nodes_offset = 0
+    vectors_offset = 0
+
+    for p in range(n_partitions):
+        s, e = int(boundaries[p]), int(boundaries[p + 1])
+        if s == e:
+            continue
+        sub = build_kdtree(vectors_int16[s:e], labels[s:e])
+        n_sub = len(sub['nodes_left'])
+        sub_left = sub['nodes_left'].copy()
+        sub_left[sub_left >= 0] += nodes_offset
+        sub_right = sub['nodes_right'].copy()
+        sub_right[sub_right >= 0] += nodes_offset
+        sub_start = sub['nodes_start'].copy() + vectors_offset
+
+        chunks_min.append(sub['nodes_min'])
+        chunks_max.append(sub['nodes_max'])
+        chunks_left.append(sub_left)
+        chunks_right.append(sub_right)
+        chunks_start.append(sub_start)
+        chunks_len.append(sub['nodes_len'])
+        chunks_vecs.append(sub['vectors_kd'])
+        chunks_labels.append(sub['labels_kd'])
+
+        partition_roots[p] = nodes_offset
+        partition_bbox_min[p] = sub['nodes_min'][0]
+        partition_bbox_max[p] = sub['nodes_max'][0]
+
+        nodes_offset += n_sub
+        vectors_offset += e - s
+
+    return {
+        'partition_roots': partition_roots,
+        'partition_bbox_min': partition_bbox_min,
+        'partition_bbox_max': partition_bbox_max,
+        'nodes_min': np.concatenate(chunks_min, axis=0),
+        'nodes_max': np.concatenate(chunks_max, axis=0),
+        'nodes_left': np.concatenate(chunks_left),
+        'nodes_right': np.concatenate(chunks_right),
+        'nodes_start': np.concatenate(chunks_start),
+        'nodes_len': np.concatenate(chunks_len),
+        'vectors_kd': np.concatenate(chunks_vecs, axis=0),
+        'labels_kd': np.concatenate(chunks_labels),
+    }
 
 
 def build_kdtree(
@@ -194,39 +252,7 @@ def main() -> int:  # noqa: PLR0915
     n_homogeneous = int((homogeneous_score >= 0).sum())
     logger.info('{} homogeneous partitions (early-exit eligible)', n_homogeneous)
 
-    logger.info('training k-means centroids (nlist={}, niter=25 nredo=4)', GLOBAL_NLIST)
-    train_vectors = np.ascontiguousarray(vectors_sorted, dtype=np.float32)
-    quantizer = faiss.IndexFlatL2(VECTOR_DIM)
-    ivf = faiss.IndexIVFFlat(quantizer, VECTOR_DIM, GLOBAL_NLIST, faiss.METRIC_L2)
-    ivf.cp.niter = 25
-    ivf.cp.nredo = 4
-    ivf.train(train_vectors)
-
-    logger.info('extracting centroids + assigning vectors to clusters')
-    centroids = np.empty((GLOBAL_NLIST, VECTOR_DIM), dtype=np.float32)
-    for c in range(GLOBAL_NLIST):
-        centroids[c] = ivf.quantizer.reconstruct(c)
-    _d, assigns = ivf.quantizer.search(train_vectors, 1)
-    assigns = assigns[:, 0]
-
-    cluster_counts = np.bincount(assigns, minlength=GLOBAL_NLIST).astype(np.int64)
-    cluster_offsets = np.empty(GLOBAL_NLIST + 1, dtype=np.int64)
-    cluster_offsets[0] = 0
-    np.cumsum(cluster_counts, out=cluster_offsets[1:])
-    cluster_order = np.argsort(assigns, kind='stable')
-    vectors_cluster = np.ascontiguousarray(train_vectors[cluster_order], dtype=np.float32)
-    labels_cluster = labels_sorted[cluster_order]
-    vec_norms = np.einsum('ij,ij->i', vectors_cluster, vectors_cluster).astype(np.float32)
-    centroid_norms = np.einsum('ij,ij->i', centroids, centroids).astype(np.float32)
-    logger.info(
-        'cluster layout: min={} p50={} p99={} max={}',
-        int(cluster_counts.min()),
-        int(np.percentile(cluster_counts, 50)),
-        int(np.percentile(cluster_counts, 99)),
-        int(cluster_counts.max()),
-    )
-
-    # Quantize cluster-sorted vectors to int16 with PADDED_DIM lanes for AVX2.
+    # Quantize partition-sorted vectors to int16 with PADDED_DIM lanes for AVX2.
     # Refs are round4'd by the data generator → multiplying by 10000 is lossless.
     logger.info(
         'quantizing vectors to int16 (scale={}, padded {} → {} lanes)',
@@ -234,27 +260,22 @@ def main() -> int:  # noqa: PLR0915
         VECTOR_DIM,
         PADDED_DIM,
     )
-    vectors_int16 = np.zeros((len(vectors_cluster), PADDED_DIM), dtype=np.int16)
-    vectors_int16[:, :VECTOR_DIM] = np.rint(vectors_cluster * QUANT_SCALE).astype(np.int16)
+    vectors_int16 = np.zeros((len(vectors_sorted), PADDED_DIM), dtype=np.int16)
+    vectors_int16[:, :VECTOR_DIM] = np.rint(vectors_sorted * QUANT_SCALE).astype(np.int16)
 
-    logger.info('building KD-tree (leaf_size={})', KDTREE_LEAF_SIZE)
-    kd = build_kdtree(vectors_int16, labels_cluster)
+    logger.info('building per-partition KD-trees (leaf_size={})', KDTREE_LEAF_SIZE)
+    kd = build_kdtree_partitioned(vectors_int16, labels_sorted, boundaries)
+    n_nonempty = int((kd['partition_roots'] >= 0).sum())
     logger.info(
-        'kdtree: {} nodes ({:.1f} MB), {} leaves',
+        'kdtree: {} nodes ({:.1f} MB) across {} non-empty partitions, {} leaves',
         len(kd['nodes_left']),
         len(kd['nodes_left']) * 80 / 1e6,
+        n_nonempty,
         int((kd['nodes_len'] > 0).sum()),
     )
 
     logger.info('writing numpy artifacts')
     np.save(LABELS_PATH, labels_sorted)
-    np.save(VECTORS_PATH, vectors_cluster)
-    np.save(VEC_NORMS_PATH, vec_norms)
-    np.save(LABELS_CLUSTER_PATH, labels_cluster)
-    np.save(CENTROIDS_PATH, centroids)
-    np.save(CENTROID_NORMS_PATH, centroid_norms)
-    np.save(CLUSTER_OFFSETS_PATH, cluster_offsets)
-    np.save(VECTORS_INT16_PATH, vectors_int16)
     np.save(KD_NODES_MIN_PATH, kd['nodes_min'])
     np.save(KD_NODES_MAX_PATH, kd['nodes_max'])
     np.save(KD_NODES_LEFT_PATH, kd['nodes_left'])
@@ -263,6 +284,9 @@ def main() -> int:  # noqa: PLR0915
     np.save(KD_NODES_LEN_PATH, kd['nodes_len'])
     np.save(VECTORS_KD_PATH, kd['vectors_kd'])
     np.save(LABELS_KD_PATH, kd['labels_kd'])
+    np.save(PARTITION_ROOTS_PATH, kd['partition_roots'])
+    np.save(PARTITION_BBOX_MIN_PATH, kd['partition_bbox_min'])
+    np.save(PARTITION_BBOX_MAX_PATH, kd['partition_bbox_max'])
 
     meta = {
         'n_partitions': N_PARTITIONS,
@@ -270,8 +294,6 @@ def main() -> int:  # noqa: PLR0915
         'boundaries': boundaries.tolist(),
         'fallbacks': fallbacks.tolist(),
         'homogeneous_score': homogeneous_score.tolist(),
-        'ivf_nprobe': GLOBAL_NPROBE,
-        'ivf_nlist': GLOBAL_NLIST,
     }
     META_PATH.write_bytes(msgspec.json.encode(meta))
 

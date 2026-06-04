@@ -13,13 +13,6 @@ FRAUD_LABEL = 'fraud'
 
 LABELS_FILENAME = 'labels.npy'
 META_FILENAME = 'meta.json'
-VECTORS_FILENAME = 'vectors.npy'
-VEC_NORMS_FILENAME = 'vec_norms.npy'
-LABELS_CLUSTER_FILENAME = 'labels_cluster.npy'
-CENTROIDS_FILENAME = 'centroids.npy'
-CENTROID_NORMS_FILENAME = 'centroid_norms.npy'
-CLUSTER_OFFSETS_FILENAME = 'cluster_offsets.npy'
-VECTORS_INT16_FILENAME = 'vectors_int16.npy'
 KD_NODES_MIN_FILENAME = 'kd_nodes_min.npy'
 KD_NODES_MAX_FILENAME = 'kd_nodes_max.npy'
 KD_NODES_LEFT_FILENAME = 'kd_nodes_left.npy'
@@ -28,6 +21,9 @@ KD_NODES_START_FILENAME = 'kd_nodes_start.npy'
 KD_NODES_LEN_FILENAME = 'kd_nodes_len.npy'
 VECTORS_KD_FILENAME = 'vectors_kd.npy'
 LABELS_KD_FILENAME = 'labels_kd.npy'
+PARTITION_ROOTS_FILENAME = 'partition_roots.npy'
+PARTITION_BBOX_MIN_FILENAME = 'partition_bbox_min.npy'
+PARTITION_BBOX_MAX_FILENAME = 'partition_bbox_max.npy'
 
 
 def load_references(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
@@ -60,6 +56,9 @@ class PartitionedIndex:
     kd_nodes_right: np.ndarray  # (n_nodes,) int32, in-RAM
     kd_nodes_start: np.ndarray  # (n_nodes,) uint32, in-RAM
     kd_nodes_len: np.ndarray  # (n_nodes,) uint32, in-RAM (0 = internal, >0 = leaf)
+    partition_roots: np.ndarray  # (256,) int32, in-RAM (-1 = empty partition)
+    partition_bbox_min: np.ndarray  # (256, 16) int16, in-RAM
+    partition_bbox_max: np.ndarray  # (256, 16) int16, in-RAM
 
 
 def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
@@ -85,6 +84,15 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
         np.load(index_dir / KD_NODES_START_FILENAME), dtype=np.uint32
     )
     kd_nodes_len = np.ascontiguousarray(np.load(index_dir / KD_NODES_LEN_FILENAME), dtype=np.uint32)
+    partition_roots = np.ascontiguousarray(
+        np.load(index_dir / PARTITION_ROOTS_FILENAME), dtype=np.int32
+    )
+    partition_bbox_min = np.ascontiguousarray(
+        np.load(index_dir / PARTITION_BBOX_MIN_FILENAME), dtype=np.int16
+    )
+    partition_bbox_max = np.ascontiguousarray(
+        np.load(index_dir / PARTITION_BBOX_MAX_FILENAME), dtype=np.int16
+    )
 
     return PartitionedIndex(
         labels=labels,
@@ -99,4 +107,7 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
         kd_nodes_right=kd_nodes_right,
         kd_nodes_start=kd_nodes_start,
         kd_nodes_len=kd_nodes_len,
+        partition_roots=partition_roots,
+        partition_bbox_min=partition_bbox_min,
+        partition_bbox_max=partition_bbox_max,
     )
