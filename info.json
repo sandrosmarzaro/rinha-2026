@@ -10,7 +10,8 @@
   "source-code-repo": "https://github.com/sandrosmarzaro/rinha-2026",
   "stack": [
     "Python",
-    "Starlette",
+    "Rust",
+    "Granian",
     "HAProxy"
   ],
   "open_to_work": true
