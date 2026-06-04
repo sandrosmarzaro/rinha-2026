@@ -1,5 +1,5 @@
 x-api: &api
-  image: sandrosmarzaro/rinha-2026:051ec0b
+  image: sandrosmarzaro/rinha-2026:c642b78
   networks: [rinha-net]
   volumes:
     - sockets:/tmp/sockets
