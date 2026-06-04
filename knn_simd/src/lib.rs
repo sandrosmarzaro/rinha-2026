@@ -18,16 +18,20 @@ use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
 
 const PADDED_DIM: usize = 16;
-const QUANT_SCALE: f32 = 10_000.0;
-const MAX_AMOUNT: f32 = 10_000.0;
-const MAX_INSTALLMENTS: f32 = 12.0;
-const AMOUNT_VS_AVG_RATIO: f32 = 10.0;
-const MAX_MINUTES: f32 = 1440.0;
-const MAX_KM: f32 = 1000.0;
-const MAX_TX_COUNT_24H: f32 = 20.0;
-const MAX_MERCHANT_AVG_AMOUNT: f32 = 10_000.0;
-const HOURS_DIVISOR: f32 = 23.0;
-const WEEKDAY_DIVISOR: f32 = 6.0;
+// All vectorization arithmetic uses f64 to match the official data-generator
+// (which runs the canonical knn_classify in double precision). f32 produced
+// off-by-one quantization on ~0.7% of test queries — enough to flip the FP=29
+// floor down further by mirroring the truth function exactly.
+const QUANT_SCALE: f64 = 10_000.0;
+const MAX_AMOUNT: f64 = 10_000.0;
+const MAX_INSTALLMENTS: f64 = 12.0;
+const AMOUNT_VS_AVG_RATIO: f64 = 10.0;
+const MAX_MINUTES: f64 = 1440.0;
+const MAX_KM: f64 = 1000.0;
+const MAX_TX_COUNT_24H: f64 = 20.0;
+const MAX_MERCHANT_AVG_AMOUNT: f64 = 10_000.0;
+const HOURS_DIVISOR: f64 = 23.0;
+const WEEKDAY_DIVISOR: f64 = 6.0;
 const MISSING_SENTINEL_SCALED: i16 = -10_000;
 
 #[inline(always)]
@@ -71,19 +75,19 @@ fn weekday_mon0(s: &[u8]) -> u32 {
 }
 
 #[inline(always)]
-fn q_round_clamp01(x: f32) -> i16 {
+fn q_round_clamp01(x: f64) -> i16 {
     let c = x.clamp(0.0, 1.0);
     (c * QUANT_SCALE).round() as i16
 }
 
 #[inline(always)]
-fn q_round_signed(x: f32) -> i16 {
+fn q_round_signed(x: f64) -> i16 {
     let c = x.clamp(-1.0, 1.0);
     (c * QUANT_SCALE).round() as i16
 }
 
 #[inline]
-fn mcc_risk(mcc: &[u8]) -> f32 {
+fn mcc_risk(mcc: &[u8]) -> f64 {
     match mcc {
         b"4511" => 0.35,
         b"5311" => 0.25,
@@ -739,23 +743,23 @@ fn bucket(cuts: &[i16], q: i16) -> u32 {
 #[allow(clippy::too_many_arguments)]
 fn vectorize_to_i16<'py>(
     py: Python<'py>,
-    amount: f32,
-    installments: f32,
+    amount: f64,
+    installments: f64,
     requested_at: &str,
-    avg_amount: f32,
-    tx_count_24h: f32,
+    avg_amount: f64,
+    tx_count_24h: f64,
     merchant_unknown: bool,
     mcc: &str,
-    merchant_avg_amount: f32,
+    merchant_avg_amount: f64,
     is_online: bool,
     card_present: bool,
-    km_from_home: f32,
+    km_from_home: f64,
     last_ts: Option<&str>,
-    last_km: f32,
+    last_km: f64,
 ) -> PyResult<(Bound<'py, PyArray1<i16>>, u32)> {
     let req_bytes = requested_at.as_bytes();
-    let hour = parse_u32_n(&req_bytes[11..13]).min(23) as f32;
-    let weekday = weekday_mon0(req_bytes) as f32;
+    let hour = parse_u32_n(&req_bytes[11..13]).min(23) as f64;
+    let weekday = weekday_mon0(req_bytes) as f64;
 
     let avg_safe = if avg_amount > 0.0 { avg_amount } else { 1.0 };
 
@@ -764,7 +768,7 @@ fn vectorize_to_i16<'py>(
         Some(ts) => {
             let req_secs = iso_to_epoch_seconds(req_bytes);
             let last_secs = iso_to_epoch_seconds(ts.as_bytes());
-            let mins = (req_secs - last_secs).unsigned_abs() as f32 / 60.0;
+            let mins = (req_secs - last_secs) as f64 / 60.0;
             (
                 q_round_clamp01(mins / MAX_MINUTES),
                 q_round_clamp01(last_km / MAX_KM),

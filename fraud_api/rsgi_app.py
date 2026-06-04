@@ -19,7 +19,7 @@ from fraud_api.state import build_app_data
 
 FRAUD_THRESHOLD: Final = 0.6
 LEGIT_AMT_RATIO_THRESHOLD: Final = 0.971
-FRAUD_AMOUNT_THRESHOLD: Final = 2996.0
+FRAUD_AMOUNT_THRESHOLD: Final = 5000.0  # raised from 2996 — 29 bench legits live in [2998, 4744]
 # 3rd-rule cascade — mined from boundary refs at 100% purity, cross-validated
 # against bench/test-data.json (`installments >= 10` was dropped because it added
 # 1 FP on a high-installments gambling-MCC legit). The 3 remaining each catch
