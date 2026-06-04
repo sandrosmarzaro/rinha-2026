@@ -80,7 +80,7 @@ ARTIFACTS = (
 )
 
 
-def build_kdtree(  # noqa: PLR0914
+def build_kdtree(
     vectors_int16: np.ndarray,
     labels: np.ndarray,
 ) -> dict[str, np.ndarray]:
