@@ -580,7 +580,7 @@ fn knn_partitioned_scalar(
     // a closer neighbor in another partition would still be possible, but the
     // partition_key routing aligns refs by discriminative features so a tight
     // primary result is usually decisive.
-    if top5.worst() < early_limit {
+    if early_limit > 0 && top5.worst() < early_limit {
         return;
     }
     // Score remaining non-empty partitions by their root-bbox lower bound.
@@ -637,7 +637,7 @@ unsafe fn knn_partitioned_avx2(
         query, vectors, labels, nodes_min, nodes_max, nodes_left, nodes_right, nodes_start,
         nodes_len, primary_root, 0, top5,
     );
-    if top5.worst() < early_limit {
+    if early_limit > 0 && top5.worst() < early_limit {
         return;
     }
     let q_ptr = query.as_ptr();
