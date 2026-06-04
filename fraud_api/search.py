@@ -11,8 +11,8 @@ PADDED_DIM: int = 16
 # Early-exit threshold for cross-partition scan: if primary partition's worst-of-top-5
 # squared distance is below this, accept without scanning the rest. Sim sweep showed
 # the safe range is ≤ 2_000_000 (det stays at FP=29 FN=0); but real Haswell preview
-# #8479 with EL=2M regressed −57 — early-exit widens per-query variance (easy 50µs,
-# hard 200µs) and the p99 tail loses what the average gained. Default disabled.
+# #8479 with EL=2M regressed -57 - early-exit widens per-query variance (easy 50us,
+# hard 200us) and the p99 tail loses what the average gained. Default disabled.
 EARLY_LIMIT: int = int(os.environ.get('RINHA_EARLY_LIMIT') or (1 << 63) - 1)
 
 
