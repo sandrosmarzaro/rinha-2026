@@ -28,11 +28,11 @@ fast-path (92.6%) OR Rust `vectorize_to_i16` (byte-direct ISO, sem datetime/nump
 
 ## Estado atual
 
-**Score real: 4957 confirmado em prévia #8441 (plateau #18, KD-tree exato).** Detection
-2557 (FP=29, FN=0, ERR=0, E=29 — floor empírico observado em múltiplas implementações
-com KNN exato sobre as mesmas refs); p99 3.97ms; p99 score 2401. **Gargalo agora
-desbalanceado**: detection precisa fechar mais 29 FPs pra chegar a 3000 — possível em
-princípio; p99 ainda tem ~600 pts pra cravar.
+**Score real: 5388 confirmado em prévia #8654 (plateau #19, det floor zerada).**
+Detection 3000 (FP=0, FN=0, ERR=0, E=0); p99 4.09ms; p99 score 2389. **Único gargalo
+restante = p99**: ~611 pts até o teto (3000), que exige p99 ≤ 1ms (alvo dos tops do
+ranking). KNN não é mais o gargalo desde plateau #18; o tail dominante é o body_read
+do RSGI accept (~200-400µs p99) — só HTTP/socket tuning ajuda agora.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo
 `zanfranceschi/rinha-de-backend-2026`. Sim local em `docker-compose.sim.yml` calibrado
