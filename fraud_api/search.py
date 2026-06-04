@@ -4,9 +4,7 @@ import knn_simd
 from fraud_api.index import PartitionedIndex
 
 K_NEIGHBORS: int = 5
-NPROBE: int = 32
 QUANT_SCALE: float = 10_000.0
-INV_QUANT_SCALE: float = 1.0 / QUANT_SCALE
 PADDED_DIM: int = 16
 
 
@@ -30,26 +28,25 @@ def partitioned_score(
     index: PartitionedIndex,
     k: int = K_NEIGHBORS,
 ) -> float:
-    """IVF KNN with Rust+AVX2 SIMD inner kernel.
+    """Exact KNN over a KD-tree with AVX2-pruned branch-and-bound.
 
-    The query arrives already quantized to int16 (from `knn_simd.vectorize_to_i16`).
-    Centroid selection dequantizes to f32 since centroids are stored in f32.
+    The homogeneous_score fast-exit covers ~9.5% of boundary queries that land
+    in a partition where every reference shares the same label — no KNN needed.
     """
     real_key = int(index.fallbacks[key])
     homogeneous = float(index.homogeneous_score[real_key])
     if homogeneous >= 0.0:
         return homogeneous
 
-    q_f32 = q_i16[:14].astype(np.float32) * INV_QUANT_SCALE
-    q_norm = float(q_f32 @ q_f32)
-    centroid_dists = index.centroid_norms + q_norm - 2.0 * (index.centroids @ q_f32)
-    cells = np.argpartition(centroid_dists, NPROBE - 1)[:NPROBE].astype(np.int64)
-
-    fc = knn_simd.knn_top5_fraud_count(
+    fc = knn_simd.knn_top5_kdtree(
         q_i16,
-        index.vectors_int16,
-        index.cluster_labels,
-        index.cluster_offsets,
-        cells,
+        index.vectors_kd,
+        index.labels_kd,
+        index.kd_nodes_min,
+        index.kd_nodes_max,
+        index.kd_nodes_left,
+        index.kd_nodes_right,
+        index.kd_nodes_start,
+        index.kd_nodes_len,
     )
     return float(fc) / k

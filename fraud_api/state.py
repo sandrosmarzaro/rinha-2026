@@ -52,27 +52,23 @@ def _build_synthetic_index() -> PartitionedIndex:
         elif fraud_count == (end - start):
             homogeneous_score[k] = 1.0
 
-    # Synthetic mode is for parity tests only — collapse everything into 1 cluster
-    # so the numpy IVF search degenerates to brute-force KNN over the small set.
+    # Synthetic mode = single-leaf KD-tree, KNN degenerates to brute-force.
     vec = np.ascontiguousarray(sorted_vectors, dtype=np.float32)
-    centroids = vec.mean(axis=0, keepdims=True).astype(np.float32)
-    centroid_norms = np.einsum('ij,ij->i', centroids, centroids).astype(np.float32)
-    vec_norms = np.einsum('ij,ij->i', vec, vec).astype(np.float32)
-    cluster_offsets = np.array([0, SYNTHETIC_N], dtype=np.int64)
-
+    vectors_kd_i16 = np.zeros((SYNTHETIC_N, 16), dtype=np.int16)
+    vectors_kd_i16[:, :VECTOR_DIM] = np.rint(vec * 10_000).astype(np.int16)
     return PartitionedIndex(
         labels=sorted_labels,
         boundaries=boundaries,
         fallbacks=compute_fallbacks(boundaries),
         homogeneous_score=homogeneous_score,
-        vectors=vec,
-        vec_norms=vec_norms,
-        cluster_labels=sorted_labels,
-        centroids=centroids,
-        centroid_norms=centroid_norms,
-        cluster_offsets=cluster_offsets,
-        ivf_nprobe=SYNTHETIC_NPROBE,
-        vectors_int16=np.zeros((SYNTHETIC_N, 16), dtype=np.int16),
+        vectors_kd=vectors_kd_i16,
+        labels_kd=sorted_labels.astype(np.uint8),
+        kd_nodes_min=vectors_kd_i16.min(axis=0, keepdims=True).astype(np.int16),
+        kd_nodes_max=vectors_kd_i16.max(axis=0, keepdims=True).astype(np.int16),
+        kd_nodes_left=np.array([-1], dtype=np.int32),
+        kd_nodes_right=np.array([-1], dtype=np.int32),
+        kd_nodes_start=np.array([0], dtype=np.uint32),
+        kd_nodes_len=np.array([SYNTHETIC_N], dtype=np.uint32),
     )
 
 
@@ -80,9 +76,9 @@ def _from_disk(data_dir: Path) -> AppData:
     index = load_partitioned_index(data_dir / INDEX_SUBDIR)
     mcc_risk = load_mcc_risk(data_dir / MCC_RISK_FILENAME)
     logger.info(
-        'mmap index loaded: {} labels, nprobe={}',
-        len(index.labels),
-        index.ivf_nprobe,
+        'mmap index loaded: {} vectors, {} kd nodes',
+        len(index.vectors_kd),
+        len(index.kd_nodes_left),
     )
     return AppData(mcc_risk=mcc_risk, index=index)
 

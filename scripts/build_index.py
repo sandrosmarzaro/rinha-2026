@@ -43,12 +43,21 @@ CENTROIDS_PATH = INDEX_DIR / 'centroids.npy'
 CENTROID_NORMS_PATH = INDEX_DIR / 'centroid_norms.npy'
 CLUSTER_OFFSETS_PATH = INDEX_DIR / 'cluster_offsets.npy'
 VECTORS_INT16_PATH = INDEX_DIR / 'vectors_int16.npy'
+KD_NODES_MIN_PATH = INDEX_DIR / 'kd_nodes_min.npy'
+KD_NODES_MAX_PATH = INDEX_DIR / 'kd_nodes_max.npy'
+KD_NODES_LEFT_PATH = INDEX_DIR / 'kd_nodes_left.npy'
+KD_NODES_RIGHT_PATH = INDEX_DIR / 'kd_nodes_right.npy'
+KD_NODES_START_PATH = INDEX_DIR / 'kd_nodes_start.npy'
+KD_NODES_LEN_PATH = INDEX_DIR / 'kd_nodes_len.npy'
+VECTORS_KD_PATH = INDEX_DIR / 'vectors_kd.npy'
+LABELS_KD_PATH = INDEX_DIR / 'labels_kd.npy'
 
 VECTOR_DIM = 14
 PADDED_DIM = 16  # 14 dims + 2 zero-pad lanes → fits one 256-bit AVX2 register
 QUANT_SCALE = 10_000  # lossless: refs are round4'd to 4 decimals
 GLOBAL_NLIST = 2048
 GLOBAL_NPROBE = 12
+KDTREE_LEAF_SIZE = 64
 
 ARTIFACTS = (
     LABELS_PATH,
@@ -60,7 +69,77 @@ ARTIFACTS = (
     CENTROID_NORMS_PATH,
     CLUSTER_OFFSETS_PATH,
     VECTORS_INT16_PATH,
+    KD_NODES_MIN_PATH,
+    KD_NODES_MAX_PATH,
+    KD_NODES_LEFT_PATH,
+    KD_NODES_RIGHT_PATH,
+    KD_NODES_START_PATH,
+    KD_NODES_LEN_PATH,
+    VECTORS_KD_PATH,
+    LABELS_KD_PATH,
 )
+
+
+def build_kdtree(  # noqa: PLR0914
+    vectors_int16: np.ndarray,
+    labels: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build a KD-tree over the i16 vectors.
+
+    Returns parallel-array layout: nodes_min/max (n, 16) i16, nodes_left/right
+    (n,) i32, nodes_start/len (n,) u32, vectors_kd (n_vec, 16) i16, labels_kd
+    (n_vec,) u8. Internal nodes have len=0; leaves carry a contiguous range
+    into the KD-reordered arrays. Split picks the widest bbox dim and
+    partitions on the median.
+    """
+    n = len(vectors_int16)
+    perm = np.arange(n, dtype=np.int64)
+    n_leaves_max = (n + KDTREE_LEAF_SIZE - 1) // KDTREE_LEAF_SIZE
+    max_nodes = max(8, 1 << (n_leaves_max.bit_length() + 2))
+
+    nodes_min = np.zeros((max_nodes, PADDED_DIM), dtype=np.int16)
+    nodes_max = np.zeros((max_nodes, PADDED_DIM), dtype=np.int16)
+    nodes_left = np.full(max_nodes, -1, dtype=np.int32)
+    nodes_right = np.full(max_nodes, -1, dtype=np.int32)
+    nodes_start = np.zeros(max_nodes, dtype=np.uint32)
+    nodes_len = np.zeros(max_nodes, dtype=np.uint32)
+    next_idx = 1
+
+    stack: list[tuple[int, int, int]] = [(0, n, 0)]
+    while stack:
+        s, e, ni = stack.pop()
+        seg = vectors_int16[perm[s:e]]
+        mn = seg.min(axis=0)
+        mx = seg.max(axis=0)
+        nodes_min[ni] = mn
+        nodes_max[ni] = mx
+        if e - s <= KDTREE_LEAF_SIZE:
+            nodes_start[ni] = s
+            nodes_len[ni] = e - s
+            continue
+        split_dim = int(np.argmax((mx - mn)[:VECTOR_DIM]))
+        vals = vectors_int16[perm[s:e], split_dim]
+        mid = (e - s) // 2
+        order = np.argpartition(vals, mid)
+        perm[s:e] = perm[s:e][order]
+        left, right = next_idx, next_idx + 1
+        next_idx += 2
+        nodes_left[ni] = left
+        nodes_right[ni] = right
+        # Push right first so left runs first (DFS, cache-friendly).
+        stack.append((s + mid, e, right))
+        stack.append((s, s + mid, left))
+
+    return {
+        'nodes_min': nodes_min[:next_idx].copy(),
+        'nodes_max': nodes_max[:next_idx].copy(),
+        'nodes_left': nodes_left[:next_idx].copy(),
+        'nodes_right': nodes_right[:next_idx].copy(),
+        'nodes_start': nodes_start[:next_idx].copy(),
+        'nodes_len': nodes_len[:next_idx].copy(),
+        'vectors_kd': np.ascontiguousarray(vectors_int16[perm], dtype=np.int16),
+        'labels_kd': np.ascontiguousarray(labels[perm], dtype=np.uint8),
+    }
 
 
 def _is_fresh() -> bool:
@@ -158,6 +237,15 @@ def main() -> int:  # noqa: PLR0915
     vectors_int16 = np.zeros((len(vectors_cluster), PADDED_DIM), dtype=np.int16)
     vectors_int16[:, :VECTOR_DIM] = np.rint(vectors_cluster * QUANT_SCALE).astype(np.int16)
 
+    logger.info('building KD-tree (leaf_size={})', KDTREE_LEAF_SIZE)
+    kd = build_kdtree(vectors_int16, labels_cluster)
+    logger.info(
+        'kdtree: {} nodes ({:.1f} MB), {} leaves',
+        len(kd['nodes_left']),
+        len(kd['nodes_left']) * 80 / 1e6,
+        int((kd['nodes_len'] > 0).sum()),
+    )
+
     logger.info('writing numpy artifacts')
     np.save(LABELS_PATH, labels_sorted)
     np.save(VECTORS_PATH, vectors_cluster)
@@ -167,6 +255,14 @@ def main() -> int:  # noqa: PLR0915
     np.save(CENTROID_NORMS_PATH, centroid_norms)
     np.save(CLUSTER_OFFSETS_PATH, cluster_offsets)
     np.save(VECTORS_INT16_PATH, vectors_int16)
+    np.save(KD_NODES_MIN_PATH, kd['nodes_min'])
+    np.save(KD_NODES_MAX_PATH, kd['nodes_max'])
+    np.save(KD_NODES_LEFT_PATH, kd['nodes_left'])
+    np.save(KD_NODES_RIGHT_PATH, kd['nodes_right'])
+    np.save(KD_NODES_START_PATH, kd['nodes_start'])
+    np.save(KD_NODES_LEN_PATH, kd['nodes_len'])
+    np.save(VECTORS_KD_PATH, kd['vectors_kd'])
+    np.save(LABELS_KD_PATH, kd['labels_kd'])
 
     meta = {
         'n_partitions': N_PARTITIONS,

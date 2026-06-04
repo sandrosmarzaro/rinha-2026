@@ -187,17 +187,50 @@ unsafe fn dist_avx2_pair(q_ptr: *const i16, v_ptr: *const i16) -> i64 {
     let q = _mm256_loadu_si256(q_ptr as *const __m256i);
     let v = _mm256_loadu_si256(v_ptr as *const __m256i);
     let diff = _mm256_sub_epi16(q, v);
-    // _mm256_madd_epi16: pairs of int16 → 8 lanes of int32, each = a0*b0 + a1*b1.
     let mads = _mm256_madd_epi16(diff, diff);
-    // Horizontal sum the 8 i32 lanes into a single i64.
-    // First, hadd within 128-bit halves.
     let lo = _mm256_castsi256_si128(mads);
     let hi = _mm256_extracti128_si256(mads, 1);
     let sum128 = _mm_add_epi32(lo, hi);
-    // Reduce 4 i32 → 1 i32. Use shuffles.
     let s1 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, 0b1110));
     let s2 = _mm_add_epi32(s1, _mm_shuffle_epi32(s1, 0b0001));
     _mm_cvtsi128_si32(s2) as i64
+}
+
+/// AVX2 lower-bound squared distance from `q` to bbox `[min, max]`:
+///     lb² = Σ_d (q[d] - clamp(q[d], min[d], max[d]))²
+/// Padded zero lanes (14, 15) contribute 0 because min=max=0 there.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn bbox_lb_avx2(q_ptr: *const i16, min_ptr: *const i16, max_ptr: *const i16) -> i64 {
+    use std::arch::x86_64::*;
+    let q = _mm256_loadu_si256(q_ptr as *const __m256i);
+    let mn = _mm256_loadu_si256(min_ptr as *const __m256i);
+    let mx = _mm256_loadu_si256(max_ptr as *const __m256i);
+    let clipped = _mm256_max_epi16(_mm256_min_epi16(q, mx), mn);
+    let diff = _mm256_sub_epi16(q, clipped);
+    let mads = _mm256_madd_epi16(diff, diff);
+    let lo = _mm256_castsi256_si128(mads);
+    let hi = _mm256_extracti128_si256(mads, 1);
+    let sum128 = _mm_add_epi32(lo, hi);
+    let s1 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, 0b1110));
+    let s2 = _mm_add_epi32(s1, _mm_shuffle_epi32(s1, 0b0001));
+    _mm_cvtsi128_si32(s2) as i64
+}
+
+/// Scalar fallback for bbox lower bound (non-AVX2 hosts).
+#[inline(always)]
+fn bbox_lb_scalar(q: &[i16], mn: &[i16], mx: &[i16]) -> i64 {
+    let mut acc = 0i64;
+    for d in 0..PADDED_DIM {
+        let qd = q[d] as i32;
+        let lo = mn[d] as i32;
+        let hi = mx[d] as i32;
+        let clipped = qd.clamp(lo, hi);
+        let diff = (qd - clipped) as i64;
+        acc += diff * diff;
+    }
+    acc
 }
 
 /// Core hot loop. Walks the probed cell ranges and updates top-5.
@@ -245,6 +278,206 @@ unsafe fn scan_clusters_avx2(
             }
         }
     }
+}
+
+/// Iterative KD-tree branch-and-bound DFS, scalar inner kernel.
+#[allow(clippy::too_many_arguments)]
+fn kdtree_scan_scalar(
+    query: &[i16],
+    vectors: &[i16],
+    labels: &[u8],
+    nodes_min: &[i16],
+    nodes_max: &[i16],
+    nodes_left: &[i32],
+    nodes_right: &[i32],
+    nodes_start: &[u32],
+    nodes_len: &[u32],
+    top5: &mut Top5,
+) {
+    const STACK_CAP: usize = 128;
+    let mut stack_idx = [0i32; STACK_CAP];
+    let mut stack_lb = [0i64; STACK_CAP];
+    let mut sp = 0usize;
+    let mut cur: i32 = 0;
+    let mut cur_lb: i64 = 0;
+    loop {
+        if cur_lb >= top5.worst() {
+            if sp == 0 {
+                return;
+            }
+            sp -= 1;
+            cur = stack_idx[sp];
+            cur_lb = stack_lb[sp];
+            continue;
+        }
+        let ci = cur as usize;
+        let len = nodes_len[ci];
+        if len > 0 {
+            let s = nodes_start[ci] as usize;
+            let e = s + len as usize;
+            for i in s..e {
+                let d = dist_scalar(query, &vectors[i * PADDED_DIM..i * PADDED_DIM + PADDED_DIM]);
+                if d < top5.worst() {
+                    top5.push(d, labels[i]);
+                }
+            }
+            if sp == 0 {
+                return;
+            }
+            sp -= 1;
+            cur = stack_idx[sp];
+            cur_lb = stack_lb[sp];
+            continue;
+        }
+        let left = nodes_left[ci];
+        let right = nodes_right[ci];
+        let lb_l = bbox_lb_scalar(
+            query,
+            &nodes_min[left as usize * PADDED_DIM..left as usize * PADDED_DIM + PADDED_DIM],
+            &nodes_max[left as usize * PADDED_DIM..left as usize * PADDED_DIM + PADDED_DIM],
+        );
+        let lb_r = bbox_lb_scalar(
+            query,
+            &nodes_min[right as usize * PADDED_DIM..right as usize * PADDED_DIM + PADDED_DIM],
+            &nodes_max[right as usize * PADDED_DIM..right as usize * PADDED_DIM + PADDED_DIM],
+        );
+        let (near, near_lb, far, far_lb) = if lb_l <= lb_r {
+            (left, lb_l, right, lb_r)
+        } else {
+            (right, lb_r, left, lb_l)
+        };
+        if far_lb < top5.worst() && sp < STACK_CAP {
+            stack_idx[sp] = far;
+            stack_lb[sp] = far_lb;
+            sp += 1;
+        }
+        cur = near;
+        cur_lb = near_lb;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn kdtree_scan_avx2(
+    query: &[i16],
+    vectors: &[i16],
+    labels: &[u8],
+    nodes_min: &[i16],
+    nodes_max: &[i16],
+    nodes_left: &[i32],
+    nodes_right: &[i32],
+    nodes_start: &[u32],
+    nodes_len: &[u32],
+    top5: &mut Top5,
+) {
+    const STACK_CAP: usize = 128;
+    let mut stack_idx = [0i32; STACK_CAP];
+    let mut stack_lb = [0i64; STACK_CAP];
+    let mut sp = 0usize;
+    let mut cur: i32 = 0;
+    let mut cur_lb: i64 = 0;
+    let q_ptr = query.as_ptr();
+    let vec_base = vectors.as_ptr();
+    let lbl_base = labels.as_ptr();
+    let min_base = nodes_min.as_ptr();
+    let max_base = nodes_max.as_ptr();
+    loop {
+        if cur_lb >= top5.worst() {
+            if sp == 0 {
+                return;
+            }
+            sp -= 1;
+            cur = stack_idx[sp];
+            cur_lb = stack_lb[sp];
+            continue;
+        }
+        let ci = cur as usize;
+        let len = nodes_len[ci];
+        if len > 0 {
+            let s = nodes_start[ci] as usize;
+            let e = s + len as usize;
+            for i in s..e {
+                let d = dist_avx2_pair(q_ptr, vec_base.add(i * PADDED_DIM));
+                if d < top5.worst() {
+                    top5.push(d, *lbl_base.add(i));
+                }
+            }
+            if sp == 0 {
+                return;
+            }
+            sp -= 1;
+            cur = stack_idx[sp];
+            cur_lb = stack_lb[sp];
+            continue;
+        }
+        let left = nodes_left[ci];
+        let right = nodes_right[ci];
+        let lb_l = bbox_lb_avx2(
+            q_ptr,
+            min_base.add(left as usize * PADDED_DIM),
+            max_base.add(left as usize * PADDED_DIM),
+        );
+        let lb_r = bbox_lb_avx2(
+            q_ptr,
+            min_base.add(right as usize * PADDED_DIM),
+            max_base.add(right as usize * PADDED_DIM),
+        );
+        let (near, near_lb, far, far_lb) = if lb_l <= lb_r {
+            (left, lb_l, right, lb_r)
+        } else {
+            (right, lb_r, left, lb_l)
+        };
+        if far_lb < top5.worst() && sp < STACK_CAP {
+            stack_idx[sp] = far;
+            stack_lb[sp] = far_lb;
+            sp += 1;
+        }
+        cur = near;
+        cur_lb = near_lb;
+    }
+}
+
+/// Python-facing exact KNN over a KD-tree (post-IVF).
+///
+/// Returns fraud-count (0..5) of top-5 nearest reference labels.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn knn_top5_kdtree(
+    py: Python<'_>,
+    query: PyReadonlyArray1<i16>,
+    vectors: PyReadonlyArray2<i16>,
+    labels: PyReadonlyArray1<u8>,
+    nodes_min: PyReadonlyArray2<i16>,
+    nodes_max: PyReadonlyArray2<i16>,
+    nodes_left: PyReadonlyArray1<i32>,
+    nodes_right: PyReadonlyArray1<i32>,
+    nodes_start: PyReadonlyArray1<u32>,
+    nodes_len: PyReadonlyArray1<u32>,
+) -> PyResult<i32> {
+    let q = query.as_slice()?;
+    let v = vectors.as_slice()?;
+    let lbl = labels.as_slice()?;
+    let nmn = nodes_min.as_slice()?;
+    let nmx = nodes_max.as_slice()?;
+    let nl = nodes_left.as_slice()?;
+    let nr = nodes_right.as_slice()?;
+    let ns = nodes_start.as_slice()?;
+    let nlen = nodes_len.as_slice()?;
+    let mut top5 = Top5::new();
+    py.allow_threads(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    kdtree_scan_avx2(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, &mut top5);
+                }
+                return;
+            }
+        }
+        kdtree_scan_scalar(q, v, lbl, nmn, nmx, nl, nr, ns, nlen, &mut top5);
+    });
+    Ok(top5.fraud_count())
 }
 
 /// Python-facing IVF kernel.
@@ -378,6 +611,7 @@ fn vectorize_to_i16<'py>(
 #[pymodule]
 fn knn_simd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(knn_top5_fraud_count, m)?)?;
+    m.add_function(wrap_pyfunction!(knn_top5_kdtree, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize_to_i16, m)?)?;
     Ok(())
 }
