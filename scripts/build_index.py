@@ -43,7 +43,6 @@ CENTROIDS_PATH = INDEX_DIR / 'centroids.npy'
 CENTROID_NORMS_PATH = INDEX_DIR / 'centroid_norms.npy'
 CLUSTER_OFFSETS_PATH = INDEX_DIR / 'cluster_offsets.npy'
 VECTORS_INT16_PATH = INDEX_DIR / 'vectors_int16.npy'
-CLUSTER_BBOX_PATH = INDEX_DIR / 'cluster_bbox.npy'
 
 VECTOR_DIM = 14
 PADDED_DIM = 16  # 14 dims + 2 zero-pad lanes → fits one 256-bit AVX2 register
@@ -61,7 +60,6 @@ ARTIFACTS = (
     CENTROID_NORMS_PATH,
     CLUSTER_OFFSETS_PATH,
     VECTORS_INT16_PATH,
-    CLUSTER_BBOX_PATH,
 )
 
 
@@ -160,21 +158,6 @@ def main() -> int:  # noqa: PLR0915
     vectors_int16 = np.zeros((len(vectors_cluster), PADDED_DIM), dtype=np.int16)
     vectors_int16[:, :VECTOR_DIM] = np.rint(vectors_cluster * QUANT_SCALE).astype(np.int16)
 
-    # Per-cluster bounding box (min/max per dim) in int16 space. Used at query
-    # time to compute a sound lower bound on the closest-possible vector
-    # distance — clusters whose lb > current kth_dist² are pruned entirely.
-    # Layout: (nlist, 2, 16) — [c, 0, :] = min, [c, 1, :] = max.
-    logger.info('computing per-cluster bbox for lower-bound prune')
-    cluster_bbox = np.zeros((GLOBAL_NLIST, 2, PADDED_DIM), dtype=np.int16)
-    # Sentinel: empty cluster bbox stays all-zero (lb²=0 = no prune). We won't
-    # probe empty clusters since they have no centroid-distance match anyway.
-    for c in range(GLOBAL_NLIST):
-        s, e = int(cluster_offsets[c]), int(cluster_offsets[c + 1])
-        if s == e:
-            continue
-        cluster_bbox[c, 0, :VECTOR_DIM] = vectors_int16[s:e, :VECTOR_DIM].min(axis=0)
-        cluster_bbox[c, 1, :VECTOR_DIM] = vectors_int16[s:e, :VECTOR_DIM].max(axis=0)
-
     logger.info('writing numpy artifacts')
     np.save(LABELS_PATH, labels_sorted)
     np.save(VECTORS_PATH, vectors_cluster)
@@ -184,7 +167,6 @@ def main() -> int:  # noqa: PLR0915
     np.save(CENTROID_NORMS_PATH, centroid_norms)
     np.save(CLUSTER_OFFSETS_PATH, cluster_offsets)
     np.save(VECTORS_INT16_PATH, vectors_int16)
-    np.save(CLUSTER_BBOX_PATH, cluster_bbox)
 
     meta = {
         'n_partitions': N_PARTITIONS,

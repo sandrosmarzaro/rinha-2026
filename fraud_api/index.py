@@ -20,7 +20,6 @@ CENTROIDS_FILENAME = 'centroids.npy'
 CENTROID_NORMS_FILENAME = 'centroid_norms.npy'
 CLUSTER_OFFSETS_FILENAME = 'cluster_offsets.npy'
 VECTORS_INT16_FILENAME = 'vectors_int16.npy'
-CLUSTER_BBOX_FILENAME = 'cluster_bbox.npy'
 
 
 def load_references(path: Path | str) -> tuple[np.ndarray, np.ndarray]:
@@ -53,7 +52,6 @@ class PartitionedIndex:
     cluster_offsets: np.ndarray  # (nlist + 1,) int64, in-RAM
     ivf_nprobe: int
     vectors_int16: np.ndarray  # (N, 16) int16, mmapped — for AVX2 SIMD kernel
-    cluster_bbox: np.ndarray  # (nlist, 2, 16) int16, in-RAM — bbox prune (min/max per dim)
 
 
 def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
@@ -76,7 +74,6 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
     cluster_offsets = np.ascontiguousarray(
         np.load(index_dir / CLUSTER_OFFSETS_FILENAME), dtype=np.int64
     )
-    cluster_bbox = np.ascontiguousarray(np.load(index_dir / CLUSTER_BBOX_FILENAME), dtype=np.int16)
 
     return PartitionedIndex(
         labels=labels,
@@ -91,5 +88,4 @@ def load_partitioned_index(index_dir: Path | str) -> PartitionedIndex:
         cluster_offsets=cluster_offsets,
         ivf_nprobe=int(meta.get('ivf_nprobe', 12)),
         vectors_int16=vectors_int16,
-        cluster_bbox=cluster_bbox,
     )
