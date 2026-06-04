@@ -8,12 +8,14 @@ atual, e gotchas vivos**.
 
 ## Arquitetura
 
-HAProxy (UDS, round-robin) → 2× Granian/RSGI → **pure numpy IVF** (nlist=2048, nprobe=12),
-mmap-compartilhado. Faiss roda só no build pra treinar k-means; runtime carrega
-`centroids.npy` + `vectors.npy` cluster-sorted + `vec_norms.npy` pré-computadas e calcula
-distâncias via norm-expansion (`||a-b||² = ||a||² + ||b||² - 2·a·b`). Payload → 2-rule raw
-fast-path (92.6%) OR vectorize 14-dim → partition_key 8-bit (homogeneous-exit) → numpy IVF
-KNN k=5 → resposta pré-renderizada (só 6 scores possíveis).
+HAProxy (UDS, round-robin) → 2× Granian/RSGI (uvloop, workers=2) → **Rust PyO3 KD-tree
+exato** (leaf=64, branch+bound prune via AVX2 bbox lb²), mmap-compartilhado. Build time:
+Faiss treina k-means só para gerar a ordem cluster-sorted que vira input do KD-tree
+builder; runtime carrega `vectors_kd.npy` (3M × 16 i16 KD-ordered) + `labels_kd.npy` +
+arrays do tree (`kd_nodes_{min,max,left,right,start,len}.npy`). Payload → 2-rule raw
+fast-path (92.6%) OR Rust `vectorize_to_i16` (byte-direct ISO, sem datetime/numpy alloc)
+→ partition_key 8-bit baked junto (homogeneous-exit cobre 9.5% das boundary) → Rust
+`knn_top5_kdtree` AVX2 (DFS prune lb²) → resposta pré-renderizada (só 6 scores possíveis).
 
 ## Limites e scoring (decidem tudo)
 
@@ -26,11 +28,11 @@ KNN k=5 → resposta pré-renderizada (só 6 scores possíveis).
 
 ## Estado atual
 
-**Score real (hardware da Rinha): 4177 confirmado em prévia #7906.** Plateau #13 com
-pure numpy IVF (drop Faiss do runtime, ele só treina k-means no build). Detection 2501
-(FP=33, FN=4, ERR=0, E=45 — idêntica ao plateau #12 já que mesmas centroides + mesmo
-nprobe = mesmo recall); p99 21.1ms; p99 score 1676. Gargalo restante = ainda p99 score
-(1676/3000) — detection já saturada perto do teto.
+**Score real: 4957 confirmado em prévia #8441 (plateau #18, KD-tree exato).** Detection
+2557 (FP=29, FN=0, ERR=0, E=29 — floor empírico observado em múltiplas implementações
+com KNN exato sobre as mesmas refs); p99 3.97ms; p99 score 2401. **Gargalo agora
+desbalanceado**: detection precisa fechar mais 29 FPs pra chegar a 3000 — possível em
+princípio; p99 ainda tem ~600 pts pra cravar.
 
 **Como medir**: prévia oficial via issue `rinha/test smarzaro-python` no repo
 `zanfranceschi/rinha-de-backend-2026`. Sim local em `docker-compose.sim.yml` calibrado
