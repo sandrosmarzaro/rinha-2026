@@ -4,7 +4,9 @@ import knn_simd
 from fraud_api.index import PartitionedIndex
 
 K_NEIGHBORS: int = 5
-NPROBE: int = 32
+# With cluster bbox prune in the Rust kernel, raising nprobe is much cheaper:
+# many of the extra cells are skipped via their bounding-box lower bound.
+NPROBE: int = 64
 QUANT_SCALE: float = 10_000.0
 PADDED_DIM: int = 16
 
@@ -50,11 +52,13 @@ def partitioned_score(
 
     # Quantize query into the pre-allocated int16 buffer (last 2 lanes stay 0).
     np.rint(query * QUANT_SCALE, out=_QUERY_INT16[:14], casting='unsafe')
-    fc = knn_simd.knn_top5_fraud_count(
+    # cluster_bbox is (nlist, 2, 16) — flatten to (nlist*32,) for the C ABI.
+    fc = knn_simd.knn_top5_bbox_pruned(
         _QUERY_INT16,
         index.vectors_int16,
         index.cluster_labels,
         index.cluster_offsets,
+        index.cluster_bbox.reshape(-1),
         cells,
     )
     return float(fc) / k

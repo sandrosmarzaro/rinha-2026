@@ -116,6 +116,53 @@ unsafe fn dist_avx2_pair(q_ptr: *const i16, v_ptr: *const i16) -> i64 {
     _mm_cvtsi128_si32(s2) as i64
 }
 
+/// Per-cluster bbox lower bound on ||q - v||² for any v in the cluster.
+/// `bbox_ptr` points to 32 i16 = [min_dim0..min_dim15, max_dim0..max_dim15].
+/// Padded lanes contribute 0 since both min and max are 0 there.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn cluster_lb_sq_avx2(q_ptr: *const i16, bbox_ptr: *const i16) -> i64 {
+    use std::arch::x86_64::*;
+    let q = _mm256_loadu_si256(q_ptr as *const __m256i);
+    let min_v = _mm256_loadu_si256(bbox_ptr as *const __m256i);
+    let max_v = _mm256_loadu_si256(bbox_ptr.add(16) as *const __m256i);
+    let above = _mm256_subs_epi16(q, max_v); // saturating; positive if q > max
+    let below = _mm256_subs_epi16(min_v, q); // saturating; positive if q < min
+    let zero = _mm256_setzero_si256();
+    let pos_above = _mm256_max_epi16(above, zero);
+    let pos_below = _mm256_max_epi16(below, zero);
+    // At most one of (above, below) is positive per dim → sum is the gap.
+    let lb_per_dim = _mm256_add_epi16(pos_above, pos_below);
+    let mads = _mm256_madd_epi16(lb_per_dim, lb_per_dim);
+    let lo = _mm256_castsi256_si128(mads);
+    let hi = _mm256_extracti128_si256(mads, 1);
+    let sum128 = _mm_add_epi32(lo, hi);
+    let s1 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, 0b1110));
+    let s2 = _mm_add_epi32(s1, _mm_shuffle_epi32(s1, 0b0001));
+    _mm_cvtsi128_si32(s2) as i64
+}
+
+#[inline(always)]
+fn cluster_lb_sq_scalar(query: &[i16], bbox: &[i16]) -> i64 {
+    // bbox = [min×16, max×16]
+    let mut acc: i64 = 0;
+    for d in 0..16 {
+        let q = query[d] as i32;
+        let lo = bbox[d] as i32;
+        let hi = bbox[16 + d] as i32;
+        let gap = if q > hi {
+            q - hi
+        } else if q < lo {
+            lo - q
+        } else {
+            0
+        };
+        acc += (gap * gap) as i64;
+    }
+    acc
+}
+
 /// Core hot loop. Walks the probed cell ranges and updates top-5.
 fn scan_clusters_scalar(
     query: &[i16],          // length 16 (14 + 2 padded zero)
@@ -159,6 +206,43 @@ unsafe fn scan_clusters_avx2(
             if d < top5.worst() {
                 top5.push(d, cluster_labels[i]);
             }
+        }
+    }
+}
+
+#[inline(always)]
+fn scan_one_cluster_scalar(
+    query: &[i16],
+    vectors: &[i16],
+    cluster_labels: &[u8],
+    s: usize,
+    e: usize,
+    top5: &mut Top5,
+) {
+    for i in s..e {
+        let v = &vectors[i * 16..i * 16 + 16];
+        let d = dist_scalar(query, v);
+        if d < top5.worst() {
+            top5.push(d, cluster_labels[i]);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_one_cluster_avx2(
+    q_ptr: *const i16,
+    base: *const i16,
+    cluster_labels: &[u8],
+    s: usize,
+    e: usize,
+    top5: &mut Top5,
+) {
+    for i in s..e {
+        let v_ptr = base.add(i * 16);
+        let d = dist_avx2_pair(q_ptr, v_ptr);
+        if d < top5.worst() {
+            top5.push(d, cluster_labels[i]);
         }
     }
 }
@@ -208,8 +292,63 @@ fn knn_top5_fraud_count(
     Ok(top5.fraud_count())
 }
 
+/// Cluster-bbox-pruned IVF kernel: skip whole clusters whose bounding-box
+/// lower bound on ||q - v||² already exceeds the current top-5 worst.
+///
+/// `cluster_bbox` is (nlist, 2, 16) flattened to (nlist * 32) i16: per cluster,
+/// 16 i16 mins followed by 16 i16 maxs.
+#[pyfunction]
+fn knn_top5_bbox_pruned(
+    py: Python<'_>,
+    query: PyReadonlyArray1<i16>,
+    vectors: PyReadonlyArray2<i16>,
+    cluster_labels: PyReadonlyArray1<u8>,
+    cluster_offsets: PyReadonlyArray1<i64>,
+    cluster_bbox: PyReadonlyArray1<i16>,
+    cells: PyReadonlyArray1<i64>,
+) -> PyResult<i32> {
+    let q = query.as_slice()?;
+    let v = vectors.as_slice()?;
+    let labels = cluster_labels.as_slice()?;
+    let offsets = cluster_offsets.as_slice()?;
+    let bbox = cluster_bbox.as_slice()?;
+    let cell_arr = cells.as_slice()?;
+
+    let mut top5 = Top5::new();
+    py.allow_threads(|| {
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        let q_ptr = q.as_ptr();
+        let base = v.as_ptr();
+        let bbox_base = bbox.as_ptr();
+
+        for &cell in cell_arr {
+            let cluster_idx = cell as usize;
+            // Each cluster's bbox occupies 32 i16 (16 min + 16 max).
+            let bbox_ptr = unsafe { bbox_base.add(cluster_idx * 32) };
+            let lb_sq = if use_avx2 {
+                unsafe { cluster_lb_sq_avx2(q_ptr, bbox_ptr) }
+            } else {
+                cluster_lb_sq_scalar(q, &bbox[cluster_idx * 32..cluster_idx * 32 + 32])
+            };
+            if lb_sq >= top5.worst() {
+                continue; // prune entire cluster
+            }
+            let s = offsets[cluster_idx] as usize;
+            let e = offsets[cluster_idx + 1] as usize;
+            if use_avx2 {
+                unsafe { scan_one_cluster_avx2(q_ptr, base, labels, s, e, &mut top5) }
+            } else {
+                scan_one_cluster_scalar(q, v, labels, s, e, &mut top5);
+            }
+        }
+    });
+
+    Ok(top5.fraud_count())
+}
+
 #[pymodule]
 fn knn_simd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(knn_top5_fraud_count, m)?)?;
+    m.add_function(wrap_pyfunction!(knn_top5_bbox_pruned, m)?)?;
     Ok(())
 }

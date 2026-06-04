@@ -73,6 +73,7 @@ def _build_synthetic_index() -> PartitionedIndex:
         cluster_offsets=cluster_offsets,
         ivf_nprobe=SYNTHETIC_NPROBE,
         vectors_int16=np.zeros((SYNTHETIC_N, 16), dtype=np.int16),
+        cluster_bbox=np.zeros((1, 2, 16), dtype=np.int16),
     )
 
 
